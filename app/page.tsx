@@ -37,7 +37,8 @@ import {
   query,
   serverTimestamp,
   setDoc,
-  updateDoc
+  updateDoc,
+  type DocumentReference
 } from "firebase/firestore";
 import { onValue, push, ref as rtdbRef, set } from "firebase/database";
 import { deleteObject, getDownloadURL, getMetadata, listAll, ref as storageRef, uploadBytesResumable } from "firebase/storage";
@@ -47,6 +48,7 @@ import type { AdAsset, AdPlayEvent, AdminProfile, AppRelease, AuditLog, Branch, 
 const MASTER_EMAIL_HASH = "a4f828fbd0b0d2fb38524e2c80f88357b40ea9e06bdb0604f23278af8049ee1d";
 
 type SectionKey = "overview" | "stores" | "devices" | "control" | "broadcast" | "storage" | "releases" | "database" | "audit";
+type AdDeliveryScope = "store" | "global";
 
 function text(value: unknown, fallback = "") {
   if (value === null || value === undefined) return fallback;
@@ -95,6 +97,34 @@ function assetIdFromStoragePath(storagePath: string) {
 
 function isStorageObjectNotFound(error: unknown) {
   return typeof error === "object" && error !== null && "code" in error && String((error as { code?: unknown }).code) === "storage/object-not-found";
+}
+
+function adUrlFromEntry(entry: unknown) {
+  if (typeof entry === "string") return entry.trim();
+  if (entry && typeof entry === "object") {
+    const row = entry as Record<string, unknown>;
+    return text(row.url || row.downloadUrl || row.storageUrl);
+  }
+  return "";
+}
+
+function adEntryMatchesFile(entry: unknown, file: Pick<StorageAdFile, "url" | "fullPath">) {
+  const assetId = assetIdFromStoragePath(file.fullPath);
+  if (typeof entry === "string") return Boolean(file.url) && entry === file.url;
+  if (entry && typeof entry === "object") {
+    const row = entry as Record<string, unknown>;
+    return (
+      text(row.url || row.downloadUrl || row.storageUrl) === file.url ||
+      text(row.storagePath || row.storage_path || row.fullPath) === file.fullPath ||
+      text(row.assetId || row.asset_id || row.adId || row.id) === assetId
+    );
+  }
+  return false;
+}
+
+function adUrlsFromList(value: unknown) {
+  if (!Array.isArray(value)) return [];
+  return Array.from(new Set(value.map(adUrlFromEntry).filter(Boolean)));
 }
 
 function normalizeBranch(id: string, data: Record<string, unknown>): Branch {
@@ -287,6 +317,8 @@ export default function A1Page() {
   const [syncingAssets, setSyncingAssets] = useState(false);
   const [deletingStoragePath, setDeletingStoragePath] = useState("");
   const [deletingApkPath, setDeletingApkPath] = useState("");
+  const [adDeliveryScope, setAdDeliveryScope] = useState<AdDeliveryScope>("store");
+  const [publishingStoragePath, setPublishingStoragePath] = useState("");
   const [uploadProgress, setUploadProgress] = useState(0);
   const [apkUploadProgress, setApkUploadProgress] = useState(0);
   const [apkVersionName, setApkVersionName] = useState("");
@@ -636,6 +668,20 @@ export default function A1Page() {
         createdAt: serverTimestamp()
       }).catch(() => undefined);
 
+      await publishStorageAdFile(
+        {
+          id: storagePath,
+          name: file.name,
+          fullPath: storagePath,
+          bucket: "",
+          contentType: file.type || "video/mp4",
+          size: file.size,
+          updated: new Date().toLocaleString("ko-KR"),
+          url
+        },
+        adDeliveryScope
+      );
+
       await refreshStorageAdFiles();
     } catch (error) {
       const message = error instanceof Error ? error.message : "광고 파일 업로드 실패";
@@ -881,6 +927,143 @@ export default function A1Page() {
     }
   }
 
+  async function addAdUrlToA3Document(targetRef: DocumentReference, url: string) {
+    const snapshot = await getDoc(targetRef).catch(() => null);
+    const data = snapshot?.exists() ? snapshot.data() : {};
+    const urls = adUrlsFromList((data as Record<string, unknown>).ad_videos);
+
+    if (!urls.includes(url)) urls.push(url);
+
+    await setDoc(
+      targetRef,
+      {
+        ad_videos: urls,
+        source: "a1",
+        updatedBy: user?.uid || "a1",
+        updatedAt: serverTimestamp()
+      },
+      { merge: true }
+    );
+  }
+
+  async function removeAdFileFromA3Document(targetRef: DocumentReference, file: StorageAdFile) {
+    const snapshot = await getDoc(targetRef).catch(() => null);
+    if (!snapshot?.exists()) return;
+
+    const data = snapshot.data() as Record<string, unknown>;
+    const rawList = Array.isArray(data.ad_videos) ? data.ad_videos : [];
+    if (!rawList.length) return;
+
+    const remainingUrls = Array.from(
+      new Set(
+        rawList
+          .filter((entry) => !adEntryMatchesFile(entry, file))
+          .map(adUrlFromEntry)
+          .filter(Boolean)
+      )
+    );
+
+    await setDoc(
+      targetRef,
+      {
+        ad_videos: remainingUrls,
+        source: "a1",
+        updatedBy: user?.uid || "a1",
+        updatedAt: serverTimestamp()
+      },
+      { merge: true }
+    );
+  }
+
+  async function publishStorageAdFile(file: StorageAdFile, scope: AdDeliveryScope = adDeliveryScope) {
+    if (!firebaseReady || !user || !admin || !file.fullPath) return;
+    if (!file.url) {
+      setErrors((current) => [...current, `${file.name}: Storage download URL이 없어 A3 송출 목록에 반영하지 못했습니다.`]);
+      return;
+    }
+
+    const targetDevices = scope === "store" ? selectedDevices : [];
+    if (scope === "store" && !targetDevices.length) {
+      setErrors((current) => [...current, "선택 매장에 연결된 A3 기기가 없어 광고 URL을 반영하지 못했습니다."]);
+      return;
+    }
+
+    setPublishingStoragePath(file.fullPath);
+    setErrors([]);
+
+    try {
+      const { db } = getFirebaseServices();
+      const assetId = assetIdFromStoragePath(file.fullPath);
+
+      if (scope === "global") {
+        await addAdUrlToA3Document(doc(db, "global_campaigns", "current_ads"), file.url);
+      } else {
+        await Promise.all(targetDevices.map((device) => addAdUrlToA3Document(doc(db, "devices", device.id), file.url)));
+      }
+
+      await setDoc(
+        doc(db, "ad_assets", assetId),
+        {
+          title: file.name,
+          name: file.name,
+          fileName: file.name,
+          storagePath: file.fullPath,
+          storageUrl: file.url,
+          url: file.url,
+          contentType: file.contentType,
+          size: file.size,
+          status: "active",
+          published: true,
+          publishedScope: scope,
+          publishedTargetBizNum: scope === "store" ? selectedBranch?.bizNum || "" : "*",
+          publishedTargetName: scope === "store" ? selectedBranch?.businessName || "" : "all",
+          publishedDeviceCount: scope === "store" ? targetDevices.length : devices.length,
+          source: "a1_storage_publish",
+          updatedBy: user.uid,
+          lastPublishedAt: serverTimestamp(),
+          updatedAt: serverTimestamp()
+        },
+        { merge: true }
+      ).catch((error) => {
+        const message = error instanceof Error ? error.message : "ad_assets publish metadata save failed";
+        setErrors((current) => [...current, `ad_assets 송출 메타 저장 실패: ${message}`]);
+      });
+
+      await setDoc(doc(collection(db, "a1_audit_logs")), {
+        action: "storage.ad_video.publish",
+        actorUid: user.uid,
+        actorEmail: user.email || "",
+        target: scope === "global" ? "global_campaigns/current_ads" : `devices/${targetDevices.length}`,
+        detail: `${file.name} -> ${scope === "global" ? "전체 A3" : `${selectedBranch?.businessName || selectedBranch?.bizNum || "-"} / ${targetDevices.length}대`}`,
+        createdAt: serverTimestamp()
+      }).catch(() => undefined);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "A3 광고 송출 목록 반영 실패";
+      setErrors((current) => [...current, message]);
+    } finally {
+      setPublishingStoragePath("");
+    }
+  }
+
+  async function removeStorageAdFileFromA3(file: StorageAdFile) {
+    if (!firebaseReady || !user || !admin || !file.fullPath) return;
+
+    const { db } = getFirebaseServices();
+    await removeAdFileFromA3Document(doc(db, "global_campaigns", "current_ads"), file).catch((error) => {
+      const message = error instanceof Error ? error.message : "global ad_videos remove failed";
+      setErrors((current) => [...current, `global_campaigns/current_ads 삭제 반영 실패: ${message}`]);
+    });
+
+    await Promise.all(
+      devices.map((device) =>
+        removeAdFileFromA3Document(doc(db, "devices", device.id), file).catch((error) => {
+          const message = error instanceof Error ? error.message : "device ad_videos remove failed";
+          setErrors((current) => [...current, `devices/${device.id} 삭제 반영 실패: ${message}`]);
+        })
+      )
+    );
+  }
+
   async function deleteStorageAdFile(file: StorageAdFile) {
     if (!firebaseReady || !user || !admin || !file.fullPath) return;
 
@@ -893,6 +1076,8 @@ export default function A1Page() {
     try {
       const { db, storage } = getFirebaseServices();
       const assetId = assetIdFromStoragePath(file.fullPath);
+
+      await removeStorageAdFileFromA3(file);
 
       await deleteObject(storageRef(storage, file.fullPath)).catch((error) => {
         if (!isStorageObjectNotFound(error)) throw error;
@@ -1170,8 +1355,14 @@ export default function A1Page() {
                       uploading={uploadingStorage}
                       syncingAssets={syncingAssets}
                       deletingPath={deletingStoragePath}
+                      publishingPath={publishingStoragePath}
                       uploadProgress={uploadProgress}
+                      deliveryScope={adDeliveryScope}
+                      setDeliveryScope={setAdDeliveryScope}
+                      selectedBranch={selectedBranch}
+                      selectedDevices={selectedDevices}
                       uploadFile={uploadStorageAdFile}
+                      publishFile={publishStorageAdFile}
                       syncAssets={syncStorageAdAssets}
                       deleteFile={deleteStorageAdFile}
                     />
@@ -1532,8 +1723,14 @@ function StoragePanel({
   uploading,
   syncingAssets,
   deletingPath,
+  publishingPath,
   uploadProgress,
+  deliveryScope,
+  setDeliveryScope,
+  selectedBranch,
+  selectedDevices,
   uploadFile,
+  publishFile,
   syncAssets,
   deleteFile
 }: {
@@ -1546,8 +1743,14 @@ function StoragePanel({
   uploading: boolean;
   syncingAssets: boolean;
   deletingPath: string;
+  publishingPath: string;
   uploadProgress: number;
+  deliveryScope: AdDeliveryScope;
+  setDeliveryScope: (scope: AdDeliveryScope) => void;
+  selectedBranch?: Branch;
+  selectedDevices: Device[];
   uploadFile: (file: File | null) => void;
+  publishFile: (file: StorageAdFile) => void;
   syncAssets: () => void;
   deleteFile: (file: StorageAdFile) => void;
 }) {
@@ -1574,7 +1777,22 @@ function StoragePanel({
           <div className="upload-box">
             <div>
               <p className="row-title">광고 영상 업로드</p>
-              <p className="row-meta">Firebase Storage `ad_videos/`에 저장하고 `ad_assets` 메타데이터도 함께 생성합니다.</p>
+              <p className="row-meta">Firebase Storage `ad_videos/`에 저장하고 A3가 읽는 `ad_videos` URL 목록까지 반영합니다.</p>
+              <div className="scope-box">
+                <div className="segmented" aria-label="A3 ad delivery target">
+                  <button type="button" className={deliveryScope === "store" ? "active" : ""} onClick={() => setDeliveryScope("store")}>
+                    선택 매장
+                  </button>
+                  <button type="button" className={deliveryScope === "global" ? "active" : ""} onClick={() => setDeliveryScope("global")}>
+                    전체
+                  </button>
+                </div>
+                <p className="scope-summary">
+                  {deliveryScope === "global"
+                    ? "A3 전체 공통 경로(global_campaigns/current_ads.ad_videos)에 URL을 반영합니다."
+                    : `${selectedBranch?.businessName || selectedBranch?.bizNum || "선택 매장"} · 연결 A3 ${selectedDevices.length}대`}
+                </p>
+              </div>
             </div>
             <label className={`button primary ${!canWrite || uploading ? "disabled-like" : ""}`}>
               <Upload size={16} />
@@ -1616,6 +1834,10 @@ function StoragePanel({
                       열기
                     </a>
                   )}
+                  <button className="button success" onClick={() => publishFile(file)} disabled={!canWrite || publishingPath === file.fullPath || !file.url} title="A3 광고 URL 송출 반영">
+                    <Upload size={16} />
+                    {publishingPath === file.fullPath ? "송출 중" : "송출"}
+                  </button>
                   <button className="button danger" onClick={() => deleteFile(file)} disabled={!canWrite || deletingPath === file.fullPath} title="Storage 광고 파일 삭제">
                     <Trash2 size={16} />
                     {deletingPath === file.fullPath ? "삭제 중" : "삭제"}

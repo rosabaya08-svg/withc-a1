@@ -605,6 +605,49 @@ a {
   padding: 14px;
 }
 
+.scope-box {
+  display: grid;
+  gap: 6px;
+  margin-top: 12px;
+}
+
+.segmented {
+  display: inline-flex;
+  width: max-content;
+  max-width: 100%;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.segmented button {
+  min-height: 32px;
+  padding: 0 12px;
+  border: 0;
+  border-right: 1px solid var(--line);
+  background: #fff;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.segmented button:last-child {
+  border-right: 0;
+}
+
+.segmented button.active {
+  background: #111827;
+  color: #fff;
+}
+
+.scope-summary {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .disabled-like {
   pointer-events: none;
   opacity: 0.55;
