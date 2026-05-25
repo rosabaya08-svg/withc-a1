@@ -38,6 +38,7 @@ import {
   serverTimestamp,
   setDoc,
   updateDoc,
+  writeBatch,
   type DocumentReference
 } from "firebase/firestore";
 import { onValue, push, ref as rtdbRef, set } from "firebase/database";
@@ -49,6 +50,16 @@ const MASTER_EMAIL_HASH = "a4f828fbd0b0d2fb38524e2c80f88357b40ea9e06bdb0604f2327
 
 type SectionKey = "overview" | "stores" | "devices" | "control" | "broadcast" | "storage" | "releases" | "database" | "audit";
 type AdDeliveryScope = "store" | "global";
+type A3AdVideoEntry = {
+  url: string;
+  storagePath: string;
+  fileName: string;
+  name: string;
+  contentType: string;
+  size: number;
+  assetId: string;
+  source: string;
+};
 
 function text(value: unknown, fallback = "") {
   if (value === null || value === undefined) return fallback;
@@ -108,13 +119,32 @@ function adUrlFromEntry(entry: unknown) {
   return "";
 }
 
+function storagePathFromFirebaseUrl(url: string) {
+  try {
+    const parsed = new URL(url);
+    const objectIndex = parsed.pathname.split("/").findIndex((part) => part === "o");
+    const parts = parsed.pathname.split("/");
+    if (objectIndex >= 0 && parts[objectIndex + 1]) return decodeURIComponent(parts[objectIndex + 1]);
+  } catch {
+    return "";
+  }
+  return "";
+}
+
 function adEntryMatchesFile(entry: unknown, file: Pick<StorageAdFile, "url" | "fullPath">) {
   const assetId = assetIdFromStoragePath(file.fullPath);
-  if (typeof entry === "string") return Boolean(file.url) && entry === file.url;
+  const entryUrl = adUrlFromEntry(entry);
+  const entryStoragePathFromUrl = storagePathFromFirebaseUrl(entryUrl);
+
+  if (typeof entry === "string") {
+    return (Boolean(file.url) && entry === file.url) || entryStoragePathFromUrl === file.fullPath;
+  }
+
   if (entry && typeof entry === "object") {
     const row = entry as Record<string, unknown>;
     return (
-      text(row.url || row.downloadUrl || row.storageUrl) === file.url ||
+      entryUrl === file.url ||
+      entryStoragePathFromUrl === file.fullPath ||
       text(row.storagePath || row.storage_path || row.fullPath) === file.fullPath ||
       text(row.assetId || row.asset_id || row.adId || row.id) === assetId
     );
@@ -122,9 +152,51 @@ function adEntryMatchesFile(entry: unknown, file: Pick<StorageAdFile, "url" | "f
   return false;
 }
 
-function adUrlsFromList(value: unknown) {
-  if (!Array.isArray(value)) return [];
-  return Array.from(new Set(value.map(adUrlFromEntry).filter(Boolean)));
+function a3AdEntryFromFile(file: StorageAdFile): A3AdVideoEntry {
+  return {
+    url: file.url,
+    storagePath: file.fullPath,
+    fileName: file.name,
+    name: file.name,
+    contentType: file.contentType,
+    size: file.size,
+    assetId: assetIdFromStoragePath(file.fullPath),
+    source: "a1_storage"
+  };
+}
+
+function normalizeA3AdEntry(entry: unknown): A3AdVideoEntry | null {
+  const url = adUrlFromEntry(entry);
+  if (!url) return null;
+
+  if (entry && typeof entry === "object") {
+    const row = entry as Record<string, unknown>;
+    const storagePath = text(row.storagePath || row.storage_path || row.fullPath) || storagePathFromFirebaseUrl(url);
+    const fileName = text(row.fileName || row.file_name || row.name) || storagePath.split("/").pop() || url.split("/").pop() || "ad_video.mp4";
+    return {
+      url,
+      storagePath,
+      fileName,
+      name: fileName,
+      contentType: text(row.contentType || row.content_type, "video/mp4"),
+      size: numberValue(row.size),
+      assetId: text(row.assetId || row.asset_id || row.adId || row.id) || assetIdFromStoragePath(storagePath || fileName),
+      source: text(row.source, "a1_storage")
+    };
+  }
+
+  const storagePath = storagePathFromFirebaseUrl(url);
+  const fileName = storagePath.split("/").pop() || url.split("/").pop() || "ad_video.mp4";
+  return {
+    url,
+    storagePath,
+    fileName,
+    name: fileName,
+    contentType: "video/mp4",
+    size: 0,
+    assetId: assetIdFromStoragePath(storagePath || fileName),
+    source: "a1_storage"
+  };
 }
 
 function normalizeBranch(id: string, data: Record<string, unknown>): Branch {
@@ -927,23 +999,39 @@ export default function A1Page() {
     }
   }
 
-  async function addAdUrlToA3Document(targetRef: DocumentReference, url: string) {
-    const snapshot = await getDoc(targetRef).catch(() => null);
-    const data = snapshot?.exists() ? snapshot.data() : {};
-    const urls = adUrlsFromList((data as Record<string, unknown>).ad_videos);
-
-    if (!urls.includes(url)) urls.push(url);
-
+  async function setA3PlaylistDocument(targetRef: DocumentReference, entries: A3AdVideoEntry[]) {
     await setDoc(
       targetRef,
       {
-        ad_videos: urls,
+        ad_videos: entries,
         source: "a1",
         updatedBy: user?.uid || "a1",
         updatedAt: serverTimestamp()
       },
       { merge: true }
     );
+  }
+
+  async function setA3PlaylistForDevices(targetDevices: Device[], entries: A3AdVideoEntry[]) {
+    if (!targetDevices.length) return;
+
+    const { db } = getFirebaseServices();
+    for (let index = 0; index < targetDevices.length; index += 400) {
+      const batch = writeBatch(db);
+      targetDevices.slice(index, index + 400).forEach((device) => {
+        batch.set(
+          doc(db, "devices", device.id),
+          {
+            ad_videos: entries,
+            source: "a1",
+            updatedBy: user?.uid || "a1",
+            updatedAt: serverTimestamp()
+          },
+          { merge: true }
+        );
+      });
+      await batch.commit();
+    }
   }
 
   async function removeAdFileFromA3Document(targetRef: DocumentReference, file: StorageAdFile) {
@@ -954,19 +1042,15 @@ export default function A1Page() {
     const rawList = Array.isArray(data.ad_videos) ? data.ad_videos : [];
     if (!rawList.length) return;
 
-    const remainingUrls = Array.from(
-      new Set(
-        rawList
-          .filter((entry) => !adEntryMatchesFile(entry, file))
-          .map(adUrlFromEntry)
-          .filter(Boolean)
-      )
-    );
+    const remainingEntries = rawList
+      .filter((entry) => !adEntryMatchesFile(entry, file))
+      .map(normalizeA3AdEntry)
+      .filter((entry): entry is A3AdVideoEntry => Boolean(entry));
 
     await setDoc(
       targetRef,
       {
-        ad_videos: remainingUrls,
+        ad_videos: remainingEntries,
         source: "a1",
         updatedBy: user?.uid || "a1",
         updatedAt: serverTimestamp()
@@ -994,11 +1078,14 @@ export default function A1Page() {
     try {
       const { db } = getFirebaseServices();
       const assetId = assetIdFromStoragePath(file.fullPath);
+      const entries = [a3AdEntryFromFile(file)];
 
       if (scope === "global") {
-        await addAdUrlToA3Document(doc(db, "global_campaigns", "current_ads"), file.url);
+        await setA3PlaylistDocument(doc(db, "global_campaigns", "current_ads"), entries);
+        await setA3PlaylistForDevices(devices, []);
       } else {
-        await Promise.all(targetDevices.map((device) => addAdUrlToA3Document(doc(db, "devices", device.id), file.url)));
+        await setA3PlaylistDocument(doc(db, "global_campaigns", "current_ads"), []);
+        await setA3PlaylistForDevices(targetDevices, entries);
       }
 
       await setDoc(
@@ -1034,7 +1121,7 @@ export default function A1Page() {
         actorUid: user.uid,
         actorEmail: user.email || "",
         target: scope === "global" ? "global_campaigns/current_ads" : `devices/${targetDevices.length}`,
-        detail: `${file.name} -> ${scope === "global" ? "전체 A3" : `${selectedBranch?.businessName || selectedBranch?.bizNum || "-"} / ${targetDevices.length}대`}`,
+        detail: `${file.name} -> ${scope === "global" ? "전체 A3" : `${selectedBranch?.businessName || selectedBranch?.bizNum || "-"} / ${targetDevices.length}대`} playlist replace`,
         createdAt: serverTimestamp()
       }).catch(() => undefined);
     } catch (error) {
@@ -1054,7 +1141,7 @@ export default function A1Page() {
       setErrors((current) => [...current, `global_campaigns/current_ads 삭제 반영 실패: ${message}`]);
     });
 
-    await Promise.all(
+    await Promise.allSettled(
       devices.map((device) =>
         removeAdFileFromA3Document(doc(db, "devices", device.id), file).catch((error) => {
           const message = error instanceof Error ? error.message : "device ad_videos remove failed";
@@ -1077,11 +1164,11 @@ export default function A1Page() {
       const { db, storage } = getFirebaseServices();
       const assetId = assetIdFromStoragePath(file.fullPath);
 
-      await removeStorageAdFileFromA3(file);
-
       await deleteObject(storageRef(storage, file.fullPath)).catch((error) => {
         if (!isStorageObjectNotFound(error)) throw error;
       });
+
+      await removeStorageAdFileFromA3(file);
 
       await setDoc(
         doc(db, "ad_assets", assetId),
