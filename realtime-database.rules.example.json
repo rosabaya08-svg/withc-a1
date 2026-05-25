@@ -1,0 +1,24 @@
+{
+  "rules": {
+    "device_presence": {
+      ".read": "auth != null && auth.token.email == 'rosabaya08@gmail.com'",
+      "$deviceId": {
+        ".write": "auth != null"
+      }
+    },
+    "businesses": {
+      "$bizNum": {
+        "device_presence": {
+          ".read": "auth != null && auth.token.email == 'rosabaya08@gmail.com'",
+          "$deviceId": {
+            ".write": "auth != null"
+          }
+        },
+        "signals": {
+          ".read": "auth != null",
+          ".write": "auth != null && auth.token.email == 'rosabaya08@gmail.com'"
+        }
+      }
+    }
+  }
+}

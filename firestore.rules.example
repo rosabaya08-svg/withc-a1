@@ -1,0 +1,25 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isA1Master() {
+      return request.auth != null
+        && request.auth.token.email == "rosabaya08@gmail.com";
+    }
+
+    match /ad_assets/{assetId} {
+      allow read: if request.auth != null;
+      allow create, update, delete: if isA1Master();
+    }
+
+    match /a1_audit_logs/{logId} {
+      allow read, create: if isA1Master();
+      allow update, delete: if false;
+    }
+
+    match /app_releases/{releaseId} {
+      allow read: if request.auth != null;
+      allow create, update, delete: if isA1Master();
+    }
+  }
+}
