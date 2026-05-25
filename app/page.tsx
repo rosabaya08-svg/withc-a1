@@ -341,7 +341,7 @@ export default function A1Page() {
   }, [firebaseReady]);
 
   useEffect(() => {
-    if (!firebaseReady) return;
+    if (!firebaseReady || !user || !admin) return;
     const { db } = getFirebaseServices();
     const unsubscribers: Array<() => void> = [];
 
@@ -419,7 +419,7 @@ export default function A1Page() {
     );
 
     return () => unsubscribers.forEach((unsubscribe) => unsubscribe());
-  }, [firebaseReady]);
+  }, [firebaseReady, user, admin]);
 
   useEffect(() => {
     const timer = window.setInterval(() => setNowMs(Date.now()), 15000);
@@ -427,7 +427,7 @@ export default function A1Page() {
   }, []);
 
   useEffect(() => {
-    if (!firebaseReady) return;
+    if (!firebaseReady || !user || !admin) return;
 
     const { rtdb } = getFirebaseServices();
     const unsubscribe = onValue(
@@ -449,13 +449,13 @@ export default function A1Page() {
     );
 
     return () => unsubscribe();
-  }, [firebaseReady]);
+  }, [firebaseReady, user, admin]);
 
   useEffect(() => {
-    if (!firebaseReady) return;
+    if (!firebaseReady || !user || !admin) return;
     refreshStorageAdFiles();
     refreshA3ApkFiles();
-  }, [firebaseReady]);
+  }, [firebaseReady, user, admin]);
 
   const branchByBizNum = useMemo(() => new Map(branches.map((branch) => [branch.bizNum, branch])), [branches]);
   const selectedBranch = branchByBizNum.get(selectedBizNum) || branches[0];
@@ -941,14 +941,26 @@ export default function A1Page() {
 
   async function handleLogin() {
     if (!firebaseReady) return;
-    const { auth, googleProvider } = getFirebaseServices();
-    await signInWithPopup(auth, googleProvider);
+    setErrors([]);
+    try {
+      const { auth, googleProvider } = getFirebaseServices();
+      await signInWithPopup(auth, googleProvider);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Google 로그인 실패";
+      setErrors((current) => [...current, message]);
+    }
   }
 
   async function handleLogout() {
     if (!firebaseReady) return;
-    const { auth } = getFirebaseServices();
-    await signOut(auth);
+    setErrors([]);
+    try {
+      const { auth } = getFirebaseServices();
+      await signOut(auth);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "로그아웃 실패";
+      setErrors((current) => [...current, message]);
+    }
   }
 
   async function changeA4Status(nextStatus: "active" | "suspended") {
@@ -1102,94 +1114,100 @@ export default function A1Page() {
             </div>
           ))}
 
-          <section className="status-strip" aria-label="A1 overview">
-            <Metric label="관리 사업자" value={branches.length} icon={<Building2 size={20} />} />
-            <Metric label="등록 기기" value={devices.length} icon={<Laptop size={20} />} tone="green" />
-            <Metric label="온라인 기기" value={onlineDevices} icon={<Activity size={20} />} tone="blue" />
-            <Metric label="A4 사용중단" value={suspendedBranches} icon={<Ban size={20} />} tone="red" />
-            <Metric label="Storage 광고 영상" value={storageVideoCount} icon={<Video size={20} />} tone="purple" />
-          </section>
+          {!firebaseReady || !authReady || !user || !admin ? (
+            <LoginGate firebaseReady={firebaseReady} authReady={authReady} isSignedIn={Boolean(user)} hasAdmin={Boolean(admin)} onLogin={handleLogin} onLogout={handleLogout} />
+          ) : (
+            <>
+              <section className="status-strip" aria-label="A1 overview">
+                <Metric label="관리 사업자" value={branches.length} icon={<Building2 size={20} />} />
+                <Metric label="등록 기기" value={devices.length} icon={<Laptop size={20} />} tone="green" />
+                <Metric label="온라인 기기" value={onlineDevices} icon={<Activity size={20} />} tone="blue" />
+                <Metric label="A4 사용중단" value={suspendedBranches} icon={<Ban size={20} />} tone="red" />
+                <Metric label="Storage 광고 영상" value={storageVideoCount} icon={<Video size={20} />} tone="purple" />
+              </section>
 
-          <section className="content-grid">
-            <StoreSelector
-              branches={filteredBranches}
-              devices={devices}
-              selectedBizNum={selectedBranch?.bizNum || ""}
-              search={search}
-              onSearch={setSearch}
-              onSelect={(bizNum) => {
-                setSelectedBizNum(bizNum);
-                if (activeSection === "overview") setActiveSection("stores");
-              }}
-            />
-            <div className="content-stack">
-              {activeSection === "overview" && (
-                <>
-                  <StoreSummary branch={selectedBranch} selectedDevices={selectedDevices} selectedAdEvents={selectedAdEvents} presenceByDeviceId={presenceByDeviceId} nowMs={nowMs} />
-                  <div className="two-col">
-                    <DevicesPanel devices={selectedDevices} presenceByDeviceId={presenceByDeviceId} nowMs={nowMs} compact />
-                    <BroadcastPanel events={selectedAdEvents} compact />
-                  </div>
-                </>
-              )}
-
-              {activeSection === "stores" && <StoreSummary branch={selectedBranch} selectedDevices={selectedDevices} selectedAdEvents={selectedAdEvents} presenceByDeviceId={presenceByDeviceId} nowMs={nowMs} />}
-
-              {activeSection === "devices" && <DevicesPanel devices={selectedDevices} presenceByDeviceId={presenceByDeviceId} nowMs={nowMs} />}
-
-              {activeSection === "control" && (
-                <ControlPanel branch={selectedBranch} canWrite={canWrite} loadingAction={loadingAction} reason={reason} setReason={setReason} changeA4Status={changeA4Status} />
-              )}
-
-              {activeSection === "broadcast" && <BroadcastPanel events={selectedAdEvents} />}
-
-              {activeSection === "storage" && (
-                <StoragePanel
-                  files={storageAdFiles}
-                  loading={loadingStorage}
-                  refresh={refreshStorageAdFiles}
-                  adAssets={adAssets}
-                  adCountsByAsset={adCountsByAsset}
-                  canWrite={canWrite}
-                  uploading={uploadingStorage}
-                  syncingAssets={syncingAssets}
-                  deletingPath={deletingStoragePath}
-                  uploadProgress={uploadProgress}
-                  uploadFile={uploadStorageAdFile}
-                  syncAssets={syncStorageAdAssets}
-                  deleteFile={deleteStorageAdFile}
-                />
-              )}
-
-              {activeSection === "releases" && (
-                <ReleasePanel
-                  release={a3Release}
-                  apkFiles={apkFiles}
+              <section className="content-grid">
+                <StoreSelector
+                  branches={filteredBranches}
                   devices={devices}
-                  canWrite={canWrite}
-                  loadingFiles={loadingApks}
-                  uploading={uploadingApk}
-                  uploadProgress={apkUploadProgress}
-                  deletingPath={deletingApkPath}
-                  versionName={apkVersionName}
-                  versionCode={apkVersionCode}
-                  releaseNote={apkReleaseNote}
-                  forceUpdate={apkForceUpdate}
-                  setVersionName={setApkVersionName}
-                  setVersionCode={setApkVersionCode}
-                  setReleaseNote={setApkReleaseNote}
-                  setForceUpdate={setApkForceUpdate}
-                  refreshFiles={refreshA3ApkFiles}
-                  uploadFile={uploadA3Apk}
-                  deleteFile={deleteA3ApkFile}
+                  selectedBizNum={selectedBranch?.bizNum || ""}
+                  search={search}
+                  onSearch={setSearch}
+                  onSelect={(bizNum) => {
+                    setSelectedBizNum(bizNum);
+                    if (activeSection === "overview") setActiveSection("stores");
+                  }}
                 />
-              )}
+                <div className="content-stack">
+                  {activeSection === "overview" && (
+                    <>
+                      <StoreSummary branch={selectedBranch} selectedDevices={selectedDevices} selectedAdEvents={selectedAdEvents} presenceByDeviceId={presenceByDeviceId} nowMs={nowMs} />
+                      <div className="two-col">
+                        <DevicesPanel devices={selectedDevices} presenceByDeviceId={presenceByDeviceId} nowMs={nowMs} compact />
+                        <BroadcastPanel events={selectedAdEvents} compact />
+                      </div>
+                    </>
+                  )}
 
-              {activeSection === "database" && <DatabasePanel selectedBranch={selectedBranch} />}
+                  {activeSection === "stores" && <StoreSummary branch={selectedBranch} selectedDevices={selectedDevices} selectedAdEvents={selectedAdEvents} presenceByDeviceId={presenceByDeviceId} nowMs={nowMs} />}
 
-              {activeSection === "audit" && <AuditPanel logs={auditLogs} />}
-            </div>
-          </section>
+                  {activeSection === "devices" && <DevicesPanel devices={selectedDevices} presenceByDeviceId={presenceByDeviceId} nowMs={nowMs} />}
+
+                  {activeSection === "control" && (
+                    <ControlPanel branch={selectedBranch} canWrite={canWrite} loadingAction={loadingAction} reason={reason} setReason={setReason} changeA4Status={changeA4Status} />
+                  )}
+
+                  {activeSection === "broadcast" && <BroadcastPanel events={selectedAdEvents} />}
+
+                  {activeSection === "storage" && (
+                    <StoragePanel
+                      files={storageAdFiles}
+                      loading={loadingStorage}
+                      refresh={refreshStorageAdFiles}
+                      adAssets={adAssets}
+                      adCountsByAsset={adCountsByAsset}
+                      canWrite={canWrite}
+                      uploading={uploadingStorage}
+                      syncingAssets={syncingAssets}
+                      deletingPath={deletingStoragePath}
+                      uploadProgress={uploadProgress}
+                      uploadFile={uploadStorageAdFile}
+                      syncAssets={syncStorageAdAssets}
+                      deleteFile={deleteStorageAdFile}
+                    />
+                  )}
+
+                  {activeSection === "releases" && (
+                    <ReleasePanel
+                      release={a3Release}
+                      apkFiles={apkFiles}
+                      devices={devices}
+                      canWrite={canWrite}
+                      loadingFiles={loadingApks}
+                      uploading={uploadingApk}
+                      uploadProgress={apkUploadProgress}
+                      deletingPath={deletingApkPath}
+                      versionName={apkVersionName}
+                      versionCode={apkVersionCode}
+                      releaseNote={apkReleaseNote}
+                      forceUpdate={apkForceUpdate}
+                      setVersionName={setApkVersionName}
+                      setVersionCode={setApkVersionCode}
+                      setReleaseNote={setApkReleaseNote}
+                      setForceUpdate={setApkForceUpdate}
+                      refreshFiles={refreshA3ApkFiles}
+                      uploadFile={uploadA3Apk}
+                      deleteFile={deleteA3ApkFile}
+                    />
+                  )}
+
+                  {activeSection === "database" && <DatabasePanel selectedBranch={selectedBranch} />}
+
+                  {activeSection === "audit" && <AuditPanel logs={auditLogs} />}
+                </div>
+              </section>
+            </>
+          )}
         </main>
       </div>
     </div>
@@ -1209,6 +1227,56 @@ function sectionTitle(section: SectionKey) {
     audit: "감사 로그"
   };
   return titles[section];
+}
+
+function LoginGate({
+  firebaseReady,
+  authReady,
+  isSignedIn,
+  hasAdmin,
+  onLogin,
+  onLogout
+}: {
+  firebaseReady: boolean;
+  authReady: boolean;
+  isSignedIn: boolean;
+  hasAdmin: boolean;
+  onLogin: () => void;
+  onLogout: () => void;
+}) {
+  const title = !firebaseReady ? "Firebase 설정 필요" : !authReady ? "로그인 상태 확인 중" : isSignedIn && !hasAdmin ? "A1 권한 없음" : "A1 관리자 로그인";
+  const description = !firebaseReady
+    ? "Cloudflare Pages Production 환경변수에 Firebase Web 설정이 들어가야 Google 로그인이 활성화됩니다."
+    : isSignedIn && !hasAdmin
+      ? "현재 Google 계정은 A1 관리자 권한이 없습니다. 권한이 있는 계정으로 다시 로그인하세요."
+      : "A1 콘솔은 승인된 Google 관리자 계정으로만 접근할 수 있습니다.";
+
+  return (
+    <section className="login-gate" aria-label="A1 login">
+      <div className="login-panel">
+        <div className="login-icon">
+          <ShieldCheck size={30} />
+        </div>
+        <p className="eyebrow">A1 Developer Console</p>
+        <h2>{title}</h2>
+        <p>{description}</p>
+        <div className="login-actions">
+          {isSignedIn ? (
+            <button className="button" onClick={onLogout} disabled={!firebaseReady}>
+              <LogOut size={16} />
+              다른 계정으로 로그인
+            </button>
+          ) : (
+            <button className="button primary login-button" onClick={onLogin} disabled={!firebaseReady || !authReady}>
+              <LogIn size={18} />
+              Google로 로그인
+            </button>
+          )}
+        </div>
+        {!firebaseReady && <div className="login-help">환경변수 반영 후 Cloudflare Pages를 다시 배포해야 합니다.</div>}
+      </div>
+    </section>
+  );
 }
 
 function StoreSelector({

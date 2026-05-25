@@ -657,6 +657,67 @@ a {
   font-weight: 800;
 }
 
+.login-gate {
+  min-height: calc(100vh - 170px);
+  display: grid;
+  place-items: center;
+  padding: 36px 0;
+}
+
+.login-panel {
+  width: min(100%, 520px);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  box-shadow: var(--shadow);
+  padding: 32px;
+  text-align: center;
+}
+
+.login-icon {
+  width: 58px;
+  height: 58px;
+  margin: 0 auto 16px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  background: #eef2ff;
+  color: var(--blue);
+}
+
+.login-panel h2 {
+  margin: 0;
+  font-size: 24px;
+  font-weight: 850;
+}
+
+.login-panel p {
+  margin: 12px 0 0;
+  color: var(--muted);
+  line-height: 1.6;
+}
+
+.login-actions {
+  display: flex;
+  justify-content: center;
+  margin-top: 22px;
+}
+
+.login-button {
+  min-width: 190px;
+}
+
+.login-help {
+  margin-top: 16px;
+  border: 1px solid #f1d39a;
+  border-radius: 8px;
+  background: #fff9eb;
+  color: #7a4300;
+  padding: 10px 12px;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
 .notice {
   border: 1px solid #f1d39a;
   border-radius: 8px;
