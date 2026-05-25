@@ -15,6 +15,12 @@ Next.js web console for A-PROJECT master control.
 
 - `rosabaya08@gmail.com`
 
+## Cloudflare Pages
+
+- Build command: `npm run pages:build`
+- Build output directory: `out`
+- Production branch: `main`
+
 ## Firebase collections
 
 - `businesses/{bizNum}`
