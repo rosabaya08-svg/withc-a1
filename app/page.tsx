@@ -389,7 +389,7 @@ export default function A1Page() {
   const [syncingAssets, setSyncingAssets] = useState(false);
   const [deletingStoragePath, setDeletingStoragePath] = useState("");
   const [deletingApkPath, setDeletingApkPath] = useState("");
-  const [adDeliveryScope, setAdDeliveryScope] = useState<AdDeliveryScope>("store");
+  const [adDeliveryScope, setAdDeliveryScope] = useState<AdDeliveryScope>("global");
   const [publishingStoragePath, setPublishingStoragePath] = useState("");
   const [uploadProgress, setUploadProgress] = useState(0);
   const [apkUploadProgress, setApkUploadProgress] = useState(0);
