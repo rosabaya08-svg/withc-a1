@@ -11,10 +11,6 @@ Next.js web console for A-PROJECT master control.
 - Firebase ad asset and playback event analytics
 - A1 audit logs
 
-## Master account
-
-- `rosabaya08@gmail.com`
-
 ## Cloudflare Pages
 
 - Build command: `npm run pages:build`

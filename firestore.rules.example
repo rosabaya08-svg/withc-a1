@@ -4,7 +4,7 @@ service cloud.firestore {
   match /databases/{database}/documents {
     function isA1Master() {
       return request.auth != null
-        && request.auth.token.email == "rosabaya08@gmail.com";
+        && request.auth.token.email == "YOUR_A1_MASTER_EMAIL@example.com";
     }
 
     match /ad_assets/{assetId} {

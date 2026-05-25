@@ -164,27 +164,6 @@ a {
   font-weight: 800;
 }
 
-.master-box {
-  border: 1px solid rgba(255, 255, 255, 0.14);
-  border-radius: 8px;
-  padding: 12px;
-  background: rgba(255, 255, 255, 0.06);
-}
-
-.master-label {
-  margin: 0;
-  color: #b8c0cc;
-  font-size: 11px;
-  font-weight: 800;
-}
-
-.master-email {
-  margin: 7px 0 0;
-  font-size: 13px;
-  font-weight: 780;
-  word-break: break-all;
-}
-
 .page {
   min-width: 0;
   display: grid;

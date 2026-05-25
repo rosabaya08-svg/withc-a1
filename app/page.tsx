@@ -44,7 +44,7 @@ import { deleteObject, getDownloadURL, getMetadata, listAll, ref as storageRef, 
 import { getFirebaseServices, hasFirebaseConfig } from "@/lib/firebase";
 import type { AdAsset, AdPlayEvent, AdminProfile, AppRelease, AuditLog, Branch, Device, DevicePresence, StorageAdFile } from "@/types";
 
-const MASTER_EMAIL = "rosabaya08@gmail.com";
+const MASTER_EMAIL_HASH = "a4f828fbd0b0d2fb38524e2c80f88357b40ea9e06bdb0604f23278af8049ee1d";
 
 type SectionKey = "overview" | "stores" | "devices" | "control" | "broadcast" | "storage" | "releases" | "database" | "audit";
 
@@ -57,6 +57,18 @@ function text(value: unknown, fallback = "") {
 function numberValue(value: unknown) {
   const parsed = Number(value || 0);
   return Number.isFinite(parsed) ? parsed : 0;
+}
+
+async function sha256Hex(value: string) {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+  return Array.from(new Uint8Array(digest))
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+async function isMasterEmail(email: string | null) {
+  if (!email || !crypto.subtle) return false;
+  return (await sha256Hex(email.trim().toLowerCase())) === MASTER_EMAIL_HASH;
 }
 
 function dateText(value: unknown) {
@@ -298,10 +310,10 @@ export default function A1Page() {
         return;
       }
 
-      if ((nextUser.email || "").toLowerCase() === MASTER_EMAIL) {
+      if (await isMasterEmail(nextUser.email || "")) {
         setAdmin({
           uid: nextUser.uid,
-          email: MASTER_EMAIL,
+          email: nextUser.email || "",
           displayName: nextUser.displayName || "A1 Master",
           role: "master",
           managedShops: ["*"]
@@ -1041,10 +1053,6 @@ export default function A1Page() {
           })}
         </nav>
 
-        <div className="master-box">
-          <p className="master-label">마스터 Google ID</p>
-          <p className="master-email">{MASTER_EMAIL}</p>
-        </div>
       </aside>
 
       <div className="page">
@@ -1055,7 +1063,7 @@ export default function A1Page() {
           </div>
 
           <div className="top-actions">
-            <div className="user-chip" title={user?.email || "not signed in"}>
+            <div className="user-chip" title={user ? "signed in" : "not signed in"}>
               <Lock size={15} />
               <span className="truncate">
                 {!firebaseReady
@@ -1064,8 +1072,8 @@ export default function A1Page() {
                     ? "auth checking"
                     : user
                       ? admin
-                        ? `${admin.displayName || admin.email} · ${admin.role}`
-                        : `${user.email || user.uid} · no A1 authority`
+                        ? `${admin.displayName || "A1 관리자"} · ${admin.role}`
+                        : "A1 권한 없음"
                       : "signed out"}
               </span>
             </div>
@@ -1086,7 +1094,7 @@ export default function A1Page() {
         <main className="main">
           {!firebaseReady && <div className="error">A1 Firebase 환경변수가 비어 있습니다. `a1/.env.local`에 Firebase Web 설정을 넣으면 콘솔이 실제 DB에 연결됩니다.</div>}
 
-          {user && !admin && <div className="notice">현재 계정은 A1 관리 권한이 없습니다. 마스터 계정은 `{MASTER_EMAIL}`입니다.</div>}
+          {user && !admin && <div className="notice">현재 로그인한 Google 계정은 A1 관리 권한이 없습니다. 관리자 권한이 등록된 계정으로 다시 로그인하세요.</div>}
 
           {errors.slice(-3).map((error) => (
             <div className="error" key={error}>
