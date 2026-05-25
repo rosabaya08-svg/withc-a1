@@ -1,0 +1,97 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isA1Master() {
+      return request.auth != null
+        && request.auth.token.email == "rosabaya08@gmail.com";
+    }
+
+    match /global_admins/{adminId} {
+      allow read: if isSignedIn();
+      allow create, update, delete: if isA1Master();
+    }
+
+    match /global_campaigns/{campaignId} {
+      allow read: if true;
+      allow create, update, delete: if isA1Master();
+    }
+
+    match /ad_assets/{assetId} {
+      allow read: if true;
+      allow create, update, delete: if isA1Master();
+    }
+
+    match /a1_audit_logs/{logId} {
+      allow read, create: if isA1Master();
+      allow update, delete: if false;
+    }
+
+    match /app_releases/{releaseId} {
+      allow read: if true;
+      allow create, update, delete: if isA1Master();
+    }
+
+    match /app_release_files/{releaseFileId} {
+      allow read: if true;
+      allow create, update, delete: if isA1Master();
+    }
+
+    match /app_release_history/{historyId} {
+      allow read: if isSignedIn();
+      allow create, update, delete: if isA1Master();
+    }
+
+    match /devices/{deviceId} {
+      allow read: if true;
+      allow create, update: if true;
+      allow delete: if isA1Master();
+    }
+
+    match /ad_play_events/{eventId} {
+      allow read: if isA1Master();
+      allow create: if true;
+      allow update, delete: if isA1Master();
+    }
+
+    match /businesses/{bizNum} {
+      allow read: if true;
+      allow create, update: if true;
+      allow delete: if isA1Master();
+
+      match /{document=**} {
+        allow read: if true;
+        allow create, update: if true;
+        allow delete: if isA1Master();
+      }
+    }
+
+    match /users/{userId} {
+      allow read: if true;
+      allow create, update: if true;
+      allow delete: if isA1Master();
+    }
+
+    match /customers/{customerId} {
+      allow read: if true;
+      allow create, update: if true;
+      allow delete: if isA1Master();
+
+      match /{document=**} {
+        allow read: if true;
+        allow create, update: if true;
+        allow delete: if isA1Master();
+      }
+    }
+
+    match /tasks/{taskId} {
+      allow read: if true;
+      allow create, update: if true;
+      allow delete: if isA1Master();
+    }
+  }
+}

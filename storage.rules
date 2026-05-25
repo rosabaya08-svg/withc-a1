@@ -2,29 +2,39 @@ rules_version = '2';
 
 service firebase.storage {
   match /b/{bucket}/o {
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
     function isA1Master() {
       return request.auth != null
-        && request.auth.token.email == "YOUR_A1_MASTER_EMAIL@example.com";
+        && request.auth.token.email == "rosabaya08@gmail.com";
     }
 
     match /ad_videos/{fileName=**} {
       allow read: if true;
-
       allow create: if isA1Master()
         && request.resource.size < 500 * 1024 * 1024
         && request.resource.contentType.matches('video/.*');
-
       allow update, delete: if isA1Master();
     }
 
     match /app_releases/a3/{fileName=**} {
       allow read: if true;
-
       allow create, update: if isA1Master()
         && request.resource.size < 2 * 1024 * 1024 * 1024
         && request.resource.contentType == "application/vnd.android.package-archive";
-
       allow delete: if isA1Master();
+    }
+
+    match /user_uploads/{fileName=**} {
+      allow read, create, update: if true;
+      allow delete: if isA1Master() || isSignedIn();
+    }
+
+    match /{allPaths=**} {
+      allow read: if true;
+      allow write: if isA1Master();
     }
   }
 }
