@@ -81,6 +81,10 @@ function assetIdFromStoragePath(storagePath: string) {
   return storagePath.replace(/[/.]/g, "_");
 }
 
+function isStorageObjectNotFound(error: unknown) {
+  return typeof error === "object" && error !== null && "code" in error && String((error as { code?: unknown }).code) === "storage/object-not-found";
+}
+
 function normalizeBranch(id: string, data: Record<string, unknown>): Branch {
   const a4Status = text(data.a4_status || data.a4Status, "active") === "suspended" ? "suspended" : "active";
   const bizNum = text(data.bizNum || data.businessNumber || data.business_registration_number, id);
@@ -255,6 +259,7 @@ export default function A1Page() {
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [adAssets, setAdAssets] = useState<AdAsset[]>([]);
   const [storageAdFiles, setStorageAdFiles] = useState<StorageAdFile[]>([]);
+  const [apkFiles, setApkFiles] = useState<StorageAdFile[]>([]);
   const [appReleases, setAppReleases] = useState<AppRelease[]>([]);
   const [adEvents, setAdEvents] = useState<AdPlayEvent[]>([]);
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
@@ -264,10 +269,12 @@ export default function A1Page() {
   const [reason, setReason] = useState("관리자 사용중단 처리");
   const [loadingAction, setLoadingAction] = useState(false);
   const [loadingStorage, setLoadingStorage] = useState(false);
+  const [loadingApks, setLoadingApks] = useState(false);
   const [uploadingStorage, setUploadingStorage] = useState(false);
   const [uploadingApk, setUploadingApk] = useState(false);
   const [syncingAssets, setSyncingAssets] = useState(false);
   const [deletingStoragePath, setDeletingStoragePath] = useState("");
+  const [deletingApkPath, setDeletingApkPath] = useState("");
   const [uploadProgress, setUploadProgress] = useState(0);
   const [apkUploadProgress, setApkUploadProgress] = useState(0);
   const [apkVersionName, setApkVersionName] = useState("");
@@ -367,7 +374,9 @@ export default function A1Page() {
       onSnapshot(
         query(collection(db, "app_releases"), limit(20)),
         (snapshot) => {
-          const rows = snapshot.docs.map((item) => normalizeAppRelease(item.id, item.data()));
+          const rows = snapshot.docs
+            .map((item) => normalizeAppRelease(item.id, item.data()))
+            .filter((release) => text(release.raw.status, "active") !== "deleted" && Boolean(release.apkUrl || release.storagePath));
           rows.sort((a, b) => b.versionCode - a.versionCode);
           setAppReleases(rows);
         },
@@ -433,6 +442,7 @@ export default function A1Page() {
   useEffect(() => {
     if (!firebaseReady) return;
     refreshStorageAdFiles();
+    refreshA3ApkFiles();
   }, [firebaseReady]);
 
   const branchByBizNum = useMemo(() => new Map(branches.map((branch) => [branch.bizNum, branch])), [branches]);
@@ -473,6 +483,7 @@ export default function A1Page() {
   const suspendedBranches = branches.filter((branch) => branch.a4Status === "suspended").length;
   const todayEvents = adEvents.filter((event) => event.startedAt.includes(todayKey())).length;
   const storageVideoCount = storageAdFiles.filter((file) => file.contentType.startsWith("video/") || file.name.toLowerCase().endsWith(".mp4")).length;
+  const apkFileCount = apkFiles.filter((file) => file.name.toLowerCase().endsWith(".apk")).length;
   const a3Release = appReleases.find((release) => release.id === "a3");
 
   const menu = [
@@ -481,7 +492,7 @@ export default function A1Page() {
     { key: "control" as const, label: "사용 제어", icon: Ban, count: suspendedBranches },
     { key: "broadcast" as const, label: "매장 광고 송출", icon: Eye, count: selectedAdEvents.length },
     { key: "storage" as const, label: "Storage 광고 파일", icon: HardDrive, count: storageVideoCount },
-    { key: "releases" as const, label: "A3 APK 배포", icon: Upload, count: a3Release?.versionCode || 0 },
+    { key: "releases" as const, label: "A3 APK 배포", icon: Upload, count: apkFileCount },
     { key: "database" as const, label: "취합 DB", icon: Database, count: 6 },
     { key: "audit" as const, label: "감사 로그", icon: AlertTriangle, count: auditLogs.length }
   ];
@@ -515,6 +526,38 @@ export default function A1Page() {
       setErrors((current) => [...current, message]);
     } finally {
       setLoadingStorage(false);
+    }
+  }
+
+  async function refreshA3ApkFiles() {
+    if (!firebaseReady) return;
+    setLoadingApks(true);
+    try {
+      const { storage } = getFirebaseServices();
+      const root = storageRef(storage, "app_releases/a3");
+      const result = await listAll(root);
+      const files = await Promise.all(
+        result.items.map(async (item) => {
+          const [metadata, url] = await Promise.all([getMetadata(item), getDownloadURL(item).catch(() => "")]);
+          return {
+            id: item.fullPath,
+            name: item.name,
+            fullPath: item.fullPath,
+            bucket: item.bucket,
+            contentType: metadata.contentType || "application/vnd.android.package-archive",
+            size: metadata.size || 0,
+            updated: metadata.updated ? new Date(metadata.updated).toLocaleString("ko-KR") : "-",
+            url
+          };
+        })
+      );
+      files.sort((a, b) => b.name.localeCompare(a.name, "ko-KR"));
+      setApkFiles(files);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Storage app_releases/a3 조회 실패";
+      setErrors((current) => [...current, message]);
+    } finally {
+      setLoadingApks(false);
     }
   }
 
@@ -640,6 +683,7 @@ export default function A1Page() {
       });
 
       const apkUrl = await getDownloadURL(fileRef);
+      const releaseFileId = assetIdFromStoragePath(storagePath);
       const releaseData = {
         appId: "a3",
         versionName,
@@ -653,13 +697,22 @@ export default function A1Page() {
         forceUpdate: apkForceUpdate,
         releaseNote: apkReleaseNote.trim(),
         status: "active",
+        storageDeleted: false,
         uploadedBy: user.email || user.uid,
         updatedAt: serverTimestamp(),
         createdAt: serverTimestamp()
       };
 
       await setDoc(doc(db, "app_releases", "a3"), releaseData, { merge: true });
-      await setDoc(doc(collection(db, "app_release_history")), releaseData);
+      await setDoc(doc(db, "app_release_files", releaseFileId), {
+        ...releaseData,
+        latest: true,
+        storageDeleted: false
+      }).catch((error) => {
+        const message = error instanceof Error ? error.message : "app_release_files 저장 실패";
+        setErrors((current) => [...current, `app_release_files 저장 실패: ${message}`]);
+      });
+      await setDoc(doc(collection(db, "app_release_history")), releaseData).catch(() => undefined);
       await setDoc(doc(collection(db, "a1_audit_logs")), {
         action: "app_release.a3.upload",
         actorUid: user.uid,
@@ -673,11 +726,97 @@ export default function A1Page() {
       setApkVersionCode("");
       setApkReleaseNote("");
       setApkForceUpdate(true);
+      await refreshA3ApkFiles();
     } catch (error) {
       const message = error instanceof Error ? error.message : "A3 APK 업로드 실패";
       setErrors((current) => [...current, message]);
     } finally {
       setUploadingApk(false);
+      setApkUploadProgress(0);
+    }
+  }
+
+  async function deleteA3ApkFile(file: StorageAdFile) {
+    if (!firebaseReady || !user || !admin || !file.fullPath) return;
+
+    const confirmed = window.confirm(`"${file.name}" APK 파일을 삭제할까요?\nStorage 파일을 삭제하고 A1 배포 메타데이터에는 삭제 상태를 기록합니다.`);
+    if (!confirmed) return;
+
+    setDeletingApkPath(file.fullPath);
+    setErrors([]);
+
+    try {
+      const { db, storage } = getFirebaseServices();
+      const releaseFileId = assetIdFromStoragePath(file.fullPath);
+
+      await deleteObject(storageRef(storage, file.fullPath)).catch((error) => {
+        if (!isStorageObjectNotFound(error)) throw error;
+      });
+
+      await setDoc(
+        doc(db, "app_release_files", releaseFileId),
+        {
+          appId: "a3",
+          fileName: file.name,
+          storagePath: file.fullPath,
+          apkUrl: file.url,
+          url: file.url,
+          contentType: file.contentType,
+          size: file.size,
+          status: "deleted",
+          storageDeleted: true,
+          deletedBy: user.uid,
+          deletedAt: serverTimestamp(),
+          updatedAt: serverTimestamp()
+        },
+        { merge: true }
+      ).catch((error) => {
+        const message = error instanceof Error ? error.message : "app_release_files 삭제 상태 저장 실패";
+        setErrors((current) => [...current, `app_release_files 삭제 상태 저장 실패: ${message}`]);
+      });
+
+      if (a3Release?.storagePath === file.fullPath) {
+        await setDoc(
+          doc(db, "app_releases", "a3"),
+          {
+            appId: "a3",
+            versionName: "",
+            versionCode: 0,
+            apkUrl: "",
+            url: "",
+            storagePath: "",
+            fileName: "",
+            size: 0,
+            forceUpdate: false,
+            releaseNote: "",
+            status: "deleted",
+            storageDeleted: true,
+            deletedBy: user.uid,
+            deletedAt: serverTimestamp(),
+            updatedAt: serverTimestamp()
+          },
+          { merge: true }
+        ).catch((error) => {
+          const message = error instanceof Error ? error.message : "app_releases/a3 삭제 상태 저장 실패";
+          setErrors((current) => [...current, `app_releases/a3 삭제 상태 저장 실패: ${message}`]);
+        });
+      }
+
+      await setDoc(doc(collection(db, "a1_audit_logs")), {
+        action: "app_release.a3.delete",
+        actorUid: user.uid,
+        actorEmail: user.email || "",
+        target: file.fullPath,
+        detail: `${file.name} / ${bytesText(file.size)}`,
+        createdAt: serverTimestamp()
+      }).catch(() => undefined);
+
+      await refreshA3ApkFiles();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "A3 APK 삭제 실패";
+      setErrors((current) => [...current, message]);
+    } finally {
+      setDeletingApkPath("");
     }
   }
 
@@ -743,7 +882,9 @@ export default function A1Page() {
       const { db, storage } = getFirebaseServices();
       const assetId = assetIdFromStoragePath(file.fullPath);
 
-      await deleteObject(storageRef(storage, file.fullPath));
+      await deleteObject(storageRef(storage, file.fullPath)).catch((error) => {
+        if (!isStorageObjectNotFound(error)) throw error;
+      });
 
       await setDoc(
         doc(db, "ad_assets", assetId),
@@ -1015,10 +1156,13 @@ export default function A1Page() {
               {activeSection === "releases" && (
                 <ReleasePanel
                   release={a3Release}
+                  apkFiles={apkFiles}
                   devices={devices}
                   canWrite={canWrite}
+                  loadingFiles={loadingApks}
                   uploading={uploadingApk}
                   uploadProgress={apkUploadProgress}
+                  deletingPath={deletingApkPath}
                   versionName={apkVersionName}
                   versionCode={apkVersionCode}
                   releaseNote={apkReleaseNote}
@@ -1027,7 +1171,9 @@ export default function A1Page() {
                   setVersionCode={setApkVersionCode}
                   setReleaseNote={setApkReleaseNote}
                   setForceUpdate={setApkForceUpdate}
+                  refreshFiles={refreshA3ApkFiles}
                   uploadFile={uploadA3Apk}
+                  deleteFile={deleteA3ApkFile}
                 />
               )}
 
@@ -1446,10 +1592,13 @@ function StoragePanel({
 
 function ReleasePanel({
   release,
+  apkFiles,
   devices,
   canWrite,
+  loadingFiles,
   uploading,
   uploadProgress,
+  deletingPath,
   versionName,
   versionCode,
   releaseNote,
@@ -1458,13 +1607,18 @@ function ReleasePanel({
   setVersionCode,
   setReleaseNote,
   setForceUpdate,
-  uploadFile
+  refreshFiles,
+  uploadFile,
+  deleteFile
 }: {
   release?: AppRelease;
+  apkFiles: StorageAdFile[];
   devices: Device[];
   canWrite: boolean;
+  loadingFiles: boolean;
   uploading: boolean;
   uploadProgress: number;
+  deletingPath: string;
   versionName: string;
   versionCode: string;
   releaseNote: string;
@@ -1473,7 +1627,9 @@ function ReleasePanel({
   setVersionCode: (value: string) => void;
   setReleaseNote: (value: string) => void;
   setForceUpdate: (value: boolean) => void;
+  refreshFiles: () => void;
   uploadFile: (file: File | null) => void;
+  deleteFile: (file: StorageAdFile) => void;
 }) {
   const a3Devices = devices.filter((device) => {
     const raw = device.raw || {};
@@ -1543,6 +1699,48 @@ function ReleasePanel({
               강제 업데이트 안내
             </label>
           </div>
+        </div>
+      </div>
+
+      <div className="panel">
+        <div className="panel-header">
+          <h2 className="panel-title">
+            <HardDrive size={17} />
+            Firebase Storage / app_releases/a3
+          </h2>
+          <button className="button" onClick={refreshFiles} disabled={loadingFiles} title="A3 APK Storage 새로고침">
+            <RefreshCw size={16} />
+            새로고침
+          </button>
+        </div>
+        <div className="panel-body ad-grid">
+          {apkFiles.length ? (
+            apkFiles.map((file) => (
+              <div className="ad-row" key={file.id}>
+                <div className="truncate">
+                  <p className="row-title truncate">{file.name}</p>
+                  <p className="row-meta truncate">{file.fullPath}</p>
+                  <p className="row-meta truncate">
+                    {file.contentType} · {bytesText(file.size)} · {file.updated}
+                  </p>
+                </div>
+                <div className="pill-row">
+                  <span className={`pill ${release?.storagePath === file.fullPath ? "green" : "blue"}`}>{release?.storagePath === file.fullPath ? "최신" : "APK"}</span>
+                  {file.url && (
+                    <a className="button" href={file.url} target="_blank" rel="noreferrer">
+                      다운로드
+                    </a>
+                  )}
+                  <button className="button danger" onClick={() => deleteFile(file)} disabled={!canWrite || deletingPath === file.fullPath} title="A3 APK Storage 파일 삭제">
+                    <Trash2 size={16} />
+                    {deletingPath === file.fullPath ? "삭제 중" : "삭제"}
+                  </button>
+                </div>
+              </div>
+            ))
+          ) : (
+            <div className="empty">Firebase Storage의 `app_releases/a3/` 폴더에 표시할 APK가 없습니다.</div>
+          )}
         </div>
       </div>
 
@@ -1630,6 +1828,9 @@ function DatabasePanel({ selectedBranch }: { selectedBranch?: Branch }) {
         <DbItem name="businesses/{bizNum}/device_presence/{deviceId}" value="매장 단위 실시간 기기 신호 복사본" />
         <DbItem name="Firebase Storage/ad_videos" value="실제 광고 영상 파일 위치" />
         <DbItem name="ad_assets" value="광고 파일 메타데이터: 제목, 광고주, Storage 경로, 활성 상태" />
+        <DbItem name="Firebase Storage/app_releases/a3" value="A3 APK 실제 파일 위치. A1에서 업로드와 삭제를 수행" />
+        <DbItem name="app_releases/a3" value="A3 최신 APK 배포 문서: version, apkUrl, storagePath, forceUpdate" />
+        <DbItem name="app_release_files" value="APK 파일별 메타데이터와 삭제 상태 기록" />
         <DbItem name="ad_campaigns" value="광고 편성: 대상 사업자, 기간, 우선순위" />
         <DbItem name="ad_play_events" value="영상 1회 송출 원장 로그: 어느 매장/기기에서 몇 회 재생됐는지 집계" />
         <DbItem name="a1_audit_logs" value="A1 관리자 조작 감사 로그" />

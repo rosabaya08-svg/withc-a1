@@ -28,8 +28,12 @@ Next.js web console for A-PROJECT master control.
 - `ad_assets/{assetId}`
 - `ad_campaigns/{campaignId}`
 - `ad_play_events/{eventId}`
+- `app_releases/a3`
+- `app_release_files/{releaseFileId}`
+- `app_release_history/{historyId}`
 - `a1_audit_logs/{logId}`
 - Firebase Storage `ad_videos/`
+- Firebase Storage `app_releases/a3/`
 
 ## A4 suspension fields
 

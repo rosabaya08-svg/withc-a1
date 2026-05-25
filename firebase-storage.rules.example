@@ -17,9 +17,14 @@ service firebase.storage {
       allow update, delete: if isA1Master();
     }
 
-    match /app_releases/{fileName=**} {
+    match /app_releases/a3/{fileName=**} {
       allow read: if request.auth != null;
-      allow create, update, delete: if isA1Master();
+
+      allow create, update: if isA1Master()
+        && request.resource.size < 2 * 1024 * 1024 * 1024
+        && request.resource.contentType == "application/vnd.android.package-archive";
+
+      allow delete: if isA1Master();
     }
   }
 }
