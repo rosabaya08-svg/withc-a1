@@ -37,7 +37,6 @@ import {
   query,
   serverTimestamp,
   setDoc,
-  updateDoc,
   writeBatch,
   type DocumentReference
 } from "firebase/firestore";
@@ -1243,27 +1242,43 @@ export default function A1Page() {
 
     try {
       const { db, rtdb } = getFirebaseServices();
-      const branchRef = doc(db, "businesses", selectedBranch.bizNum);
+      const branchRefs = Array.from(new Set([selectedBranch.id, selectedBranch.bizNum].filter(Boolean))).map((id) => doc(db, "businesses", id));
       const action = nextStatus === "suspended" ? "a4.suspend" : "a4.resume";
       const detail = nextStatus === "suspended" ? reason.trim() || "관리자 사용중단 처리" : "A4 사용중단 해제";
 
       if (nextStatus === "suspended") {
-        await updateDoc(branchRef, {
-          a4_status: "suspended",
-          a4Status: "suspended",
-          a4_suspended_reason: detail,
-          a4_suspended_at: serverTimestamp(),
-          a4_suspended_by: user.uid,
-          updated_at: serverTimestamp()
-        });
+        await Promise.all(
+          branchRefs.map((branchRef) =>
+            setDoc(
+              branchRef,
+              {
+                a4_status: "suspended",
+                a4Status: "suspended",
+                a4_suspended_reason: detail,
+                a4_suspended_at: serverTimestamp(),
+                a4_suspended_by: user.uid,
+                updated_at: serverTimestamp()
+              },
+              { merge: true }
+            )
+          )
+        );
       } else {
-        await updateDoc(branchRef, {
-          a4_status: "active",
-          a4Status: "active",
-          a4_resumed_at: serverTimestamp(),
-          a4_resumed_by: user.uid,
-          updated_at: serverTimestamp()
-        });
+        await Promise.all(
+          branchRefs.map((branchRef) =>
+            setDoc(
+              branchRef,
+              {
+                a4_status: "active",
+                a4Status: "active",
+                a4_resumed_at: serverTimestamp(),
+                a4_resumed_by: user.uid,
+                updated_at: serverTimestamp()
+              },
+              { merge: true }
+            )
+          )
+        );
       }
 
       await setDoc(doc(collection(db, "a1_audit_logs")), {
@@ -1411,6 +1426,10 @@ export default function A1Page() {
                   }}
                 />
                 <div className="content-stack">
+                  {activeSection !== "control" && (
+                    <QuickA4Control branch={selectedBranch} canWrite={canWrite} loadingAction={loadingAction} changeA4Status={changeA4Status} />
+                  )}
+
                   {activeSection === "overview" && (
                     <>
                       <StoreSummary branch={selectedBranch} selectedDevices={selectedDevices} selectedAdEvents={selectedAdEvents} presenceByDeviceId={presenceByDeviceId} nowMs={nowMs} />
@@ -1653,6 +1672,42 @@ function StoreSummary({
           <Field label="A4 상태" value={branch.a4Status === "suspended" ? "사용중단" : "정상"} />
           <Field label="중단 사유" value={branch.a4SuspendedReason || "-"} />
         </div>
+      </div>
+    </div>
+  );
+}
+
+function QuickA4Control({
+  branch,
+  canWrite,
+  loadingAction,
+  changeA4Status
+}: {
+  branch?: Branch;
+  canWrite: boolean;
+  loadingAction: boolean;
+  changeA4Status: (status: "active" | "suspended") => void;
+}) {
+  if (!branch) return null;
+
+  return (
+    <div className="quick-control">
+      <div>
+        <p className="quick-title">A4 사용 제어</p>
+        <p className="quick-meta">
+          {branch.businessName} · {branch.bizNum}
+        </p>
+      </div>
+      <span className={`pill ${branch.a4Status === "suspended" ? "red" : "green"}`}>{branch.a4Status === "suspended" ? "사용중단" : "사용가능"}</span>
+      <div className="toolbar quick-actions">
+        <button className="button danger" onClick={() => changeA4Status("suspended")} disabled={!canWrite || loadingAction || branch.a4Status === "suspended"} title="A4 사용중단">
+          <Power size={16} />
+          사용중단
+        </button>
+        <button className="button success" onClick={() => changeA4Status("active")} disabled={!canWrite || loadingAction || branch.a4Status === "active"} title="A4 사용재개">
+          <Unlock size={16} />
+          사용재개
+        </button>
       </div>
     </div>
   );
