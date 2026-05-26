@@ -353,16 +353,20 @@ function agoText(ageMs: number) {
 }
 
 function resolveDevicePresence(device: Device, presence: DevicePresence | undefined, nowMs: number): PresenceView {
-  const mirroredHeartbeatMs = numberValue(device.raw.lastHeartbeatAtMs);
+  const mirroredHeartbeatMs = numberValue(device.raw.lastHeartbeatAtMs || device.raw.lastHeartbeatAt);
+  const mirroredDisconnectedMs = numberValue(device.raw.lastDisconnectedAtMs || device.raw.lastDisconnectedAt);
+  const mirroredStatus = text(device.raw.presence_status || device.raw.presenceStatus || device.raw.onlineStatus || device.raw.connectionStatus).toLowerCase();
   const heartbeatMs = presence?.lastHeartbeatAtMs || mirroredHeartbeatMs;
   const ageMs = heartbeatMs ? nowMs - heartbeatMs : Number.POSITIVE_INFINITY;
+  const isConnected = presence?.connected === true || (!presence && mirroredStatus === "online");
+  const isDisconnected = presence?.connected === false || (!presence && ["offline", "disconnected"].includes(mirroredStatus));
 
-  if (presence?.connected === true && ageMs <= ONLINE_WINDOW_MS) {
+  if (isConnected && ageMs <= ONLINE_WINDOW_MS) {
     return { status: "online", label: "신호 수신", tone: "green", lastText: agoText(ageMs) };
   }
 
-  if (presence?.connected === false) {
-    const disconnectedMs = presence.lastDisconnectedAtMs || heartbeatMs;
+  if (isDisconnected) {
+    const disconnectedMs = presence?.lastDisconnectedAtMs || mirroredDisconnectedMs || heartbeatMs;
     const disconnectedAgeMs = disconnectedMs ? nowMs - disconnectedMs : Number.POSITIVE_INFINITY;
     return { status: "offline", label: "꺼짐/미수신", tone: "red", lastText: agoText(disconnectedAgeMs) };
   }
@@ -385,6 +389,7 @@ export default function A1Page() {
   const [branches, setBranches] = useState<Branch[]>([]);
   const [devices, setDevices] = useState<Device[]>([]);
   const [presenceByDeviceId, setPresenceByDeviceId] = useState<Record<string, DevicePresence>>({});
+  const [presencePermissionDenied, setPresencePermissionDenied] = useState(false);
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [adAssets, setAdAssets] = useState<AdAsset[]>([]);
   const [storageAdFiles, setStorageAdFiles] = useState<StorageAdFile[]>([]);
@@ -553,6 +558,7 @@ export default function A1Page() {
     const unsubscribe = onValue(
       rtdbRef(rtdb, "device_presence"),
       (snapshot) => {
+        setPresencePermissionDenied(false);
         const value = snapshot.val();
         if (!value || typeof value !== "object") {
           setPresenceByDeviceId({});
@@ -565,7 +571,14 @@ export default function A1Page() {
         }, {});
         setPresenceByDeviceId(rows);
       },
-      (error) => setErrors((current) => [...current, `device_presence 조회 실패: ${error.message}`])
+      (error) => {
+        setPresenceByDeviceId({});
+        setPresencePermissionDenied(true);
+        setErrors((current) => current.filter((item) => !item.startsWith("device_presence 조회 실패")));
+        if (error.message && !error.message.toLowerCase().includes("permission_denied")) {
+          setErrors((current) => [...current, `device_presence 조회 실패: ${error.message}`]);
+        }
+      }
     );
 
     return () => unsubscribe();
@@ -1493,6 +1506,12 @@ export default function A1Page() {
               {error}
             </div>
           ))}
+
+          {presencePermissionDenied && user && admin && (
+            <div className="notice">
+              RTDB device_presence 읽기 권한이 없어 Firestore devices 미러 기준으로 연결 상태를 표시 중입니다. Realtime Database rules를 배포하면 실시간 신호 원장으로 전환됩니다.
+            </div>
+          )}
 
           {!firebaseReady || !authReady || !user || !admin ? (
             <LoginGate firebaseReady={firebaseReady} authReady={authReady} isSignedIn={Boolean(user)} hasAdmin={Boolean(admin)} onLogin={handleLogin} onLogout={handleLogout} />
