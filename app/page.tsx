@@ -198,6 +198,22 @@ function normalizeA3AdEntry(entry: unknown): A3AdVideoEntry | null {
   };
 }
 
+function parseA3ApkInfo(file: StorageAdFile) {
+  const metadata = file.customMetadata || {};
+  const metadataVersionName = text(metadata.versionName || metadata.version_name);
+  const metadataVersionCode = numberValue(metadata.versionCode || metadata.version_code);
+  if (metadataVersionName && metadataVersionCode > 0) {
+    return { versionName: metadataVersionName, versionCode: metadataVersionCode };
+  }
+
+  const match = file.name.match(/^a3_(.+)_(\d+)_\d+_/);
+  if (match) {
+    return { versionName: match[1], versionCode: Number(match[2]) };
+  }
+
+  return { versionName: "", versionCode: 0 };
+}
+
 function normalizeBranch(id: string, data: Record<string, unknown>): Branch {
   const a4Status = text(data.a4_status || data.a4Status, "active") === "suspended" ? "suspended" : "active";
   const bizNum = text(data.bizNum || data.businessNumber || data.business_registration_number, id);
@@ -388,6 +404,7 @@ export default function A1Page() {
   const [syncingAssets, setSyncingAssets] = useState(false);
   const [deletingStoragePath, setDeletingStoragePath] = useState("");
   const [deletingApkPath, setDeletingApkPath] = useState("");
+  const [deployingApkPath, setDeployingApkPath] = useState("");
   const [adDeliveryScope, setAdDeliveryScope] = useState<AdDeliveryScope>("global");
   const [publishingStoragePath, setPublishingStoragePath] = useState("");
   const [uploadProgress, setUploadProgress] = useState(0);
@@ -662,7 +679,8 @@ export default function A1Page() {
             contentType: metadata.contentType || "application/vnd.android.package-archive",
             size: metadata.size || 0,
             updated: metadata.updated ? new Date(metadata.updated).toLocaleString("ko-KR") : "-",
-            url
+            url,
+            customMetadata: metadata.customMetadata || {}
           };
         })
       );
@@ -824,18 +842,20 @@ export default function A1Page() {
         contentType: "application/vnd.android.package-archive",
         size: file.size,
         forceUpdate: apkForceUpdate,
+        installMode: apkForceUpdate ? "forced" : "optional",
+        autoUpdate: false,
         releaseNote: apkReleaseNote.trim(),
-        status: "active",
+        status: "uploaded",
         storageDeleted: false,
         uploadedBy: user.email || user.uid,
         updatedAt: serverTimestamp(),
         createdAt: serverTimestamp()
       };
 
-      await setDoc(doc(db, "app_releases", "a3"), releaseData, { merge: true });
       await setDoc(doc(db, "app_release_files", releaseFileId), {
         ...releaseData,
-        latest: true,
+        latest: false,
+        published: false,
         storageDeleted: false
       }).catch((error) => {
         const message = error instanceof Error ? error.message : "app_release_files 저장 실패";
@@ -862,6 +882,76 @@ export default function A1Page() {
     } finally {
       setUploadingApk(false);
       setApkUploadProgress(0);
+    }
+  }
+
+  async function deployA3ApkFile(file: StorageAdFile) {
+    if (!firebaseReady || !user || !admin || !file.fullPath || !file.url) return;
+
+    const { versionName, versionCode } = parseA3ApkInfo(file);
+    if (!versionName || versionCode <= 0) {
+      setErrors((current) => [...current, `${file.name}: APK 버전 정보를 찾지 못했습니다. 업로드 시 versionName/versionCode를 입력한 파일만 배포할 수 있습니다.`]);
+      return;
+    }
+
+    const confirmed = window.confirm(
+      `"${file.name}" APK를 A3 최신 배포로 확정할까요?\n\nA3가 업데이트 감시 기능을 가진 버전이면 versionCode ${versionCode}를 보고 업데이트를 시작합니다.`
+    );
+    if (!confirmed) return;
+
+    setDeployingApkPath(file.fullPath);
+    setErrors([]);
+
+    try {
+      const { db } = getFirebaseServices();
+      const releaseFileId = assetIdFromStoragePath(file.fullPath);
+      const releaseNote = apkReleaseNote.trim() || text(file.customMetadata?.releaseNote || file.customMetadata?.release_note);
+      const releaseData = {
+        appId: "a3",
+        versionName,
+        versionCode,
+        apkUrl: file.url,
+        url: file.url,
+        storagePath: file.fullPath,
+        fileName: file.name,
+        contentType: file.contentType,
+        size: file.size,
+        forceUpdate: apkForceUpdate,
+        installMode: apkForceUpdate ? "forced" : "optional",
+        autoUpdate: apkForceUpdate,
+        releaseNote,
+        status: "active",
+        storageDeleted: false,
+        deployedBy: user.email || user.uid,
+        updatedAt: serverTimestamp(),
+        deployedAt: serverTimestamp()
+      };
+
+      await setDoc(doc(db, "app_releases", "a3"), releaseData, { merge: true });
+      await setDoc(
+        doc(db, "app_release_files", releaseFileId),
+        {
+          ...releaseData,
+          latest: true,
+          published: true,
+          publishedAt: serverTimestamp()
+        },
+        { merge: true }
+      );
+      await setDoc(doc(collection(db, "app_release_history")), releaseData).catch(() => undefined);
+      await setDoc(doc(collection(db, "a1_audit_logs")), {
+        action: "app_release.a3.deploy",
+        actorUid: user.uid,
+        actorEmail: user.email || "",
+        target: file.fullPath,
+        detail: `A3 APK ${versionName}+${versionCode} 배포 확정`,
+        createdAt: serverTimestamp()
+      }).catch(() => undefined);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "A3 APK 배포 실패";
+      setErrors((current) => [...current, message]);
+    } finally {
+      setDeployingApkPath("");
     }
   }
 
@@ -1484,6 +1574,7 @@ export default function A1Page() {
                       uploading={uploadingApk}
                       uploadProgress={apkUploadProgress}
                       deletingPath={deletingApkPath}
+                      deployingPath={deployingApkPath}
                       versionName={apkVersionName}
                       versionCode={apkVersionCode}
                       releaseNote={apkReleaseNote}
@@ -1494,6 +1585,7 @@ export default function A1Page() {
                       setForceUpdate={setApkForceUpdate}
                       refreshFiles={refreshA3ApkFiles}
                       uploadFile={uploadA3Apk}
+                      deployFile={deployA3ApkFile}
                       deleteFile={deleteA3ApkFile}
                     />
                   )}
@@ -2039,6 +2131,7 @@ function ReleasePanel({
   uploading,
   uploadProgress,
   deletingPath,
+  deployingPath,
   versionName,
   versionCode,
   releaseNote,
@@ -2049,6 +2142,7 @@ function ReleasePanel({
   setForceUpdate,
   refreshFiles,
   uploadFile,
+  deployFile,
   deleteFile
 }: {
   release?: AppRelease;
@@ -2059,6 +2153,7 @@ function ReleasePanel({
   uploading: boolean;
   uploadProgress: number;
   deletingPath: string;
+  deployingPath: string;
   versionName: string;
   versionCode: string;
   releaseNote: string;
@@ -2069,6 +2164,7 @@ function ReleasePanel({
   setForceUpdate: (value: boolean) => void;
   refreshFiles: () => void;
   uploadFile: (file: File | null) => void;
+  deployFile: (file: StorageAdFile) => void;
   deleteFile: (file: StorageAdFile) => void;
 }) {
   const a3Devices = devices.filter((device) => {
@@ -2098,7 +2194,7 @@ function ReleasePanel({
           <div className="upload-box">
             <div>
               <p className="row-title">A3 APK 업로드</p>
-              <p className="row-meta">Firebase Storage `app_releases/a3/`에 저장하고 `app_releases/a3` 최신 배포 문서를 갱신합니다.</p>
+              <p className="row-meta">Firebase Storage `app_releases/a3/`에 먼저 저장합니다. 실제 A3 최신 배포는 파일 목록의 `배포` 버튼으로 확정합니다.</p>
             </div>
             <label className={`button primary ${!canWrite || uploading ? "disabled-like" : ""}`}>
               <Upload size={16} />
@@ -2136,7 +2232,7 @@ function ReleasePanel({
             </label>
             <label className="check-row">
               <input type="checkbox" checked={forceUpdate} onChange={(event) => setForceUpdate(event.target.checked)} />
-              강제 업데이트 안내
+              배포 시 A3 자동 업데이트 표시
             </label>
           </div>
         </div>
@@ -2171,6 +2267,10 @@ function ReleasePanel({
                       다운로드
                     </a>
                   )}
+                  <button className="button success" onClick={() => deployFile(file)} disabled={!canWrite || deployingPath === file.fullPath || !file.url} title="이 APK를 A3 최신 배포로 확정">
+                    <Upload size={16} />
+                    {deployingPath === file.fullPath ? "배포 중" : "배포"}
+                  </button>
                   <button className="button danger" onClick={() => deleteFile(file)} disabled={!canWrite || deletingPath === file.fullPath} title="A3 APK Storage 파일 삭제">
                     <Trash2 size={16} />
                     {deletingPath === file.fullPath ? "삭제 중" : "삭제"}

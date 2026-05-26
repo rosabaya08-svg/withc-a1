@@ -23,6 +23,7 @@ export type StorageAdFile = {
   size: number;
   updated: string;
   url: string;
+  customMetadata?: Record<string, string>;
 };
 
 export type AppRelease = {
