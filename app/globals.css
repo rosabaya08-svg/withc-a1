@@ -341,6 +341,10 @@ a {
   align-items: start;
 }
 
+.content-grid.content-grid-full {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .content-stack {
   display: grid;
   gap: 16px;

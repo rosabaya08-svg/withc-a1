@@ -629,6 +629,9 @@ export default function A1Page() {
     { key: "audit" as const, label: "감사 로그", icon: AlertTriangle, count: auditLogs.length }
   ];
 
+  const storeScopedSections: SectionKey[] = ["overview", "stores", "devices", "control", "broadcast", "storage"];
+  const showStoreSelector = storeScopedSections.includes(activeSection);
+
   async function refreshStorageAdFiles() {
     if (!firebaseReady) return;
     setLoadingStorage(true);
@@ -1495,6 +1498,7 @@ export default function A1Page() {
             <LoginGate firebaseReady={firebaseReady} authReady={authReady} isSignedIn={Boolean(user)} hasAdmin={Boolean(admin)} onLogin={handleLogin} onLogout={handleLogout} />
           ) : (
             <>
+              {activeSection === "overview" && (
               <section className="status-strip" aria-label="A1 overview">
                 <Metric label="관리 사업자" value={branches.length} icon={<Building2 size={20} />} />
                 <Metric label="등록 기기" value={devices.length} icon={<Laptop size={20} />} tone="green" />
@@ -1502,8 +1506,10 @@ export default function A1Page() {
                 <Metric label="A4 사용중단" value={suspendedBranches} icon={<Ban size={20} />} tone="red" />
                 <Metric label="Storage 광고 영상" value={storageVideoCount} icon={<Video size={20} />} tone="purple" />
               </section>
+              )}
 
-              <section className="content-grid">
+              <section className={`content-grid ${showStoreSelector ? "" : "content-grid-full"}`}>
+                {showStoreSelector && (
                 <StoreSelector
                   branches={filteredBranches}
                   devices={devices}
@@ -1515,8 +1521,9 @@ export default function A1Page() {
                     if (activeSection === "overview") setActiveSection("stores");
                   }}
                 />
+                )}
                 <div className="content-stack">
-                  {activeSection !== "control" && (
+                  {activeSection === "stores" && (
                     <QuickA4Control branch={selectedBranch} canWrite={canWrite} loadingAction={loadingAction} changeA4Status={changeA4Status} />
                   )}
 
