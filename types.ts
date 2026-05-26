@@ -76,6 +76,8 @@ export type AdAsset = {
   durationSec: number;
   targetBizNums: string[];
   url: string;
+  placement: string;
+  clickTarget: string;
 };
 
 export type AdPlayEvent = {
@@ -88,6 +90,20 @@ export type AdPlayEvent = {
   completed: boolean;
   failed: boolean;
   startedAt: string;
+  raw: Record<string, unknown>;
+};
+
+export type AdDailyRollup = {
+  id: string;
+  dateKey: string;
+  adId: string;
+  assetId: string;
+  bizNum: string;
+  deviceId: string;
+  storeName: string;
+  totalCount: number;
+  completedCount: number;
+  failedCount: number;
   raw: Record<string, unknown>;
 };
 

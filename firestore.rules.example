@@ -42,5 +42,17 @@ service cloud.firestore {
       allow create, update: if true;
       allow delete: if isA1Master();
     }
+
+    match /ad_play_events/{eventId} {
+      allow read: if isA1Master();
+      allow create: if true;
+      allow update, delete: if isA1Master();
+    }
+
+    match /ad_daily_rollups/{rollupId} {
+      allow read: if isA1Master();
+      allow create, update: if true;
+      allow delete: if isA1Master();
+    }
   }
 }

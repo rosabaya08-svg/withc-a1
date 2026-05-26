@@ -31,24 +31,28 @@ import {
   collection,
   doc,
   getDoc,
+  getDocs,
   limit,
   onSnapshot,
   orderBy,
   query,
   serverTimestamp,
   setDoc,
+  where,
   writeBatch,
   type DocumentReference
 } from "firebase/firestore";
 import { onValue, push, ref as rtdbRef, set } from "firebase/database";
 import { deleteObject, getDownloadURL, getMetadata, listAll, ref as storageRef, uploadBytesResumable } from "firebase/storage";
 import { getFirebaseServices, hasFirebaseConfig } from "@/lib/firebase";
-import type { AdAsset, AdPlayEvent, AdminProfile, AppRelease, AuditLog, Branch, Device, DevicePresence, StorageAdFile } from "@/types";
+import type { AdAsset, AdDailyRollup, AdPlayEvent, AdminProfile, AppRelease, AuditLog, Branch, Device, DevicePresence, StorageAdFile } from "@/types";
 
 const MASTER_EMAIL_HASH = "a4f828fbd0b0d2fb38524e2c80f88357b40ea9e06bdb0604f23278af8049ee1d";
 
 type SectionKey = "overview" | "stores" | "devices" | "control" | "broadcast" | "storage" | "releases" | "database" | "audit";
 type AdDeliveryScope = "store" | "global";
+type AdPlacement = "normal" | "portrait_fullscreen";
+type AdClickTarget = "hotdeal" | "luxury";
 type A3AdVideoEntry = {
   url: string;
   storagePath: string;
@@ -58,6 +62,11 @@ type A3AdVideoEntry = {
   size: number;
   assetId: string;
   source: string;
+  placement: AdPlacement;
+  displayMode: "normal" | "fullscreen";
+  clickTarget: AdClickTarget;
+  landingUrl: string;
+  analysisMode: "daily_until_yesterday";
 };
 
 function text(value: unknown, fallback = "") {
@@ -69,6 +78,36 @@ function text(value: unknown, fallback = "") {
 function numberValue(value: unknown) {
   const parsed = Number(value || 0);
   return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function normalizeAdPlacement(value: unknown): AdPlacement {
+  return text(value) === "portrait_fullscreen" ? "portrait_fullscreen" : "normal";
+}
+
+function normalizeAdClickTarget(value: unknown): AdClickTarget {
+  return text(value) === "luxury" ? "luxury" : "hotdeal";
+}
+
+function adLandingUrl(target: AdClickTarget) {
+  return target === "luxury" ? "https://signage-ai-a5.co.kr/luxuly" : "https://signage-ai-a5.co.kr";
+}
+
+function adPlacementLabel(placement: AdPlacement) {
+  return placement === "portrait_fullscreen" ? "세로 전면" : "기본 광고";
+}
+
+function adClickTargetLabel(target: AdClickTarget) {
+  return target === "luxury" ? "명품관" : "핫딜";
+}
+
+function getDateKey(date: Date) {
+  return `${date.getFullYear()}${String(date.getMonth() + 1).padStart(2, "0")}${String(date.getDate()).padStart(2, "0")}`;
+}
+
+function getYesterdayDateKey() {
+  const date = new Date();
+  date.setDate(date.getDate() - 1);
+  return getDateKey(date);
 }
 
 async function sha256Hex(value: string) {
@@ -151,7 +190,9 @@ function adEntryMatchesFile(entry: unknown, file: Pick<StorageAdFile, "url" | "f
   return false;
 }
 
-function a3AdEntryFromFile(file: StorageAdFile): A3AdVideoEntry {
+function a3AdEntryFromFile(file: StorageAdFile, placement?: AdPlacement, clickTarget?: AdClickTarget): A3AdVideoEntry {
+  const resolvedPlacement = placement ?? normalizeAdPlacement(file.customMetadata?.placement);
+  const resolvedClickTarget = clickTarget ?? normalizeAdClickTarget(file.customMetadata?.clickTarget || file.customMetadata?.click_target);
   return {
     url: file.url,
     storagePath: file.fullPath,
@@ -160,7 +201,12 @@ function a3AdEntryFromFile(file: StorageAdFile): A3AdVideoEntry {
     contentType: file.contentType,
     size: file.size,
     assetId: assetIdFromStoragePath(file.fullPath),
-    source: "a1_storage"
+    source: "a1_storage",
+    placement: resolvedPlacement,
+    displayMode: resolvedPlacement === "portrait_fullscreen" ? "fullscreen" : "normal",
+    clickTarget: resolvedClickTarget,
+    landingUrl: adLandingUrl(resolvedClickTarget),
+    analysisMode: "daily_until_yesterday"
   };
 }
 
@@ -180,7 +226,12 @@ function normalizeA3AdEntry(entry: unknown): A3AdVideoEntry | null {
       contentType: text(row.contentType || row.content_type, "video/mp4"),
       size: numberValue(row.size),
       assetId: text(row.assetId || row.asset_id || row.adId || row.id) || assetIdFromStoragePath(storagePath || fileName),
-      source: text(row.source, "a1_storage")
+      source: text(row.source, "a1_storage"),
+      placement: normalizeAdPlacement(row.placement || row.adPlacement),
+      displayMode: normalizeAdPlacement(row.placement || row.adPlacement) === "portrait_fullscreen" ? "fullscreen" : "normal",
+      clickTarget: normalizeAdClickTarget(row.clickTarget || row.click_target || row.target),
+      landingUrl: text(row.landingUrl || row.landing_url) || adLandingUrl(normalizeAdClickTarget(row.clickTarget || row.click_target || row.target)),
+      analysisMode: "daily_until_yesterday"
     };
   }
 
@@ -194,7 +245,12 @@ function normalizeA3AdEntry(entry: unknown): A3AdVideoEntry | null {
     contentType: "video/mp4",
     size: 0,
     assetId: assetIdFromStoragePath(storagePath || fileName),
-    source: "a1_storage"
+    source: "a1_storage",
+    placement: "normal",
+    displayMode: "normal",
+    clickTarget: "hotdeal",
+    landingUrl: adLandingUrl("hotdeal"),
+    analysisMode: "daily_until_yesterday"
   };
 }
 
@@ -311,7 +367,25 @@ function normalizeAdAsset(id: string, data: Record<string, unknown>): AdAsset {
     status: text(data.status, "active"),
     durationSec: numberValue(data.durationSec || data.duration || data.duration_seconds),
     targetBizNums: Array.isArray(targets) ? targets.map(String) : [],
-    url: text(data.url || data.downloadUrl || data.storageUrl)
+    url: text(data.url || data.downloadUrl || data.storageUrl),
+    placement: text(data.placement || data.adPlacement, "normal"),
+    clickTarget: text(data.clickTarget || data.click_target || data.target, "hotdeal")
+  };
+}
+
+function normalizeAdDailyRollup(id: string, data: Record<string, unknown>): AdDailyRollup {
+  return {
+    id,
+    dateKey: text(data.dateKey || data.date_key),
+    adId: text(data.adId || data.ad_id || data.assetId || data.asset_id),
+    assetId: text(data.assetId || data.asset_id || data.adId || data.ad_id),
+    bizNum: text(data.bizNum || data.businessNumber || data.storeId || data.store_id),
+    deviceId: text(data.deviceId || data.device_id),
+    storeName: text(data.storeName || data.shopName),
+    totalCount: numberValue(data.totalCount || data.total_count || data.playCount || data.play_count),
+    completedCount: numberValue(data.completedCount || data.completed_count),
+    failedCount: numberValue(data.failedCount || data.failed_count),
+    raw: data
   };
 }
 
@@ -396,6 +470,7 @@ export default function A1Page() {
   const [apkFiles, setApkFiles] = useState<StorageAdFile[]>([]);
   const [appReleases, setAppReleases] = useState<AppRelease[]>([]);
   const [adEvents, setAdEvents] = useState<AdPlayEvent[]>([]);
+  const [adDailyRollups, setAdDailyRollups] = useState<AdDailyRollup[]>([]);
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
   const [selectedBizNum, setSelectedBizNum] = useState("");
   const [activeSection, setActiveSection] = useState<SectionKey>("overview");
@@ -411,6 +486,8 @@ export default function A1Page() {
   const [deletingApkPath, setDeletingApkPath] = useState("");
   const [deployingApkPath, setDeployingApkPath] = useState("");
   const [adDeliveryScope, setAdDeliveryScope] = useState<AdDeliveryScope>("global");
+  const [adPlacement, setAdPlacement] = useState<AdPlacement>("normal");
+  const [adClickTarget, setAdClickTarget] = useState<AdClickTarget>("hotdeal");
   const [publishingStoragePath, setPublishingStoragePath] = useState("");
   const [uploadProgress, setUploadProgress] = useState(0);
   const [apkUploadProgress, setApkUploadProgress] = useState(0);
@@ -421,6 +498,20 @@ export default function A1Page() {
   const [errors, setErrors] = useState<string[]>([]);
 
   const firebaseReady = hasFirebaseConfig();
+
+  async function refreshAdDailyRollups() {
+    if (!firebaseReady || !user || !admin) return;
+    try {
+      const { db } = getFirebaseServices();
+      const yesterday = getYesterdayDateKey();
+      const snapshot = await getDocs(query(collection(db, "ad_daily_rollups"), where("dateKey", "<=", yesterday), orderBy("dateKey", "desc"), limit(1500)));
+      setAdDailyRollups(snapshot.docs.map((item) => normalizeAdDailyRollup(item.id, item.data())));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "ad_daily_rollups 조회 실패";
+      setErrors((current) => [...current, `ad_daily_rollups 조회 실패: ${message}`]);
+      setAdDailyRollups([]);
+    }
+  }
 
   useEffect(() => {
     if (!firebaseReady) return;
@@ -588,6 +679,7 @@ export default function A1Page() {
     if (!firebaseReady || !user || !admin) return;
     refreshStorageAdFiles();
     refreshA3ApkFiles();
+    refreshAdDailyRollups();
   }, [firebaseReady, user, admin]);
 
   const branchByBizNum = useMemo(() => new Map(branches.map((branch) => [branch.bizNum, branch])), [branches]);
@@ -613,16 +705,19 @@ export default function A1Page() {
 
   const adCountsByAsset = useMemo(() => {
     const map = new Map<string, { total: number; completed: number; failed: number }>();
-    adEvents.forEach((event) => {
-      const key = event.adId || "unknown";
+    const yesterday = getYesterdayDateKey();
+    adDailyRollups
+      .filter((rollup) => !rollup.dateKey || rollup.dateKey <= yesterday)
+      .forEach((rollup) => {
+      const key = rollup.assetId || rollup.adId || "unknown";
       const current = map.get(key) || { total: 0, completed: 0, failed: 0 };
-      current.total += 1;
-      if (event.completed) current.completed += 1;
-      if (event.failed) current.failed += 1;
+      current.total += rollup.totalCount;
+      current.completed += rollup.completedCount;
+      current.failed += rollup.failedCount;
       map.set(key, current);
     });
     return map;
-  }, [adEvents]);
+  }, [adDailyRollups]);
 
   const onlineDevices = devices.filter((device) => resolveDevicePresence(device, presenceByDeviceId[device.id], nowMs).status === "online").length;
   const suspendedBranches = branches.filter((branch) => branch.a4Status === "suspended").length;
@@ -663,7 +758,8 @@ export default function A1Page() {
             contentType: metadata.contentType || "-",
             size: metadata.size || 0,
             updated: metadata.updated ? new Date(metadata.updated).toLocaleString("ko-KR") : "-",
-            url
+            url,
+            customMetadata: metadata.customMetadata || {}
           };
         })
       );
@@ -726,6 +822,11 @@ export default function A1Page() {
         contentType: file.type || "video/mp4",
         customMetadata: {
           source: "a1",
+          placement: adPlacement,
+          displayMode: adPlacement === "portrait_fullscreen" ? "fullscreen" : "normal",
+          clickTarget: adClickTarget,
+          landingUrl: adLandingUrl(adClickTarget),
+          analysisMode: "daily_until_yesterday",
           uploadedBy: user.email || user.uid
         }
       });
@@ -755,6 +856,11 @@ export default function A1Page() {
         contentType: file.type || "video/mp4",
         size: file.size,
         status: "active",
+        placement: adPlacement,
+        displayMode: adPlacement === "portrait_fullscreen" ? "fullscreen" : "normal",
+        clickTarget: adClickTarget,
+        landingUrl: adLandingUrl(adClickTarget),
+        analysisMode: "daily_until_yesterday",
         source: "a1_storage_upload",
         createdBy: user.uid,
         createdAt: serverTimestamp(),
@@ -782,7 +888,14 @@ export default function A1Page() {
           contentType: file.type || "video/mp4",
           size: file.size,
           updated: new Date().toLocaleString("ko-KR"),
-          url
+          url,
+          customMetadata: {
+            placement: adPlacement,
+            displayMode: adPlacement === "portrait_fullscreen" ? "fullscreen" : "normal",
+            clickTarget: adClickTarget,
+            landingUrl: adLandingUrl(adClickTarget),
+            analysisMode: "daily_until_yesterday"
+          }
         },
         adDeliveryScope
       );
@@ -1078,6 +1191,13 @@ export default function A1Page() {
               contentType: file.contentType,
               size: file.size,
               status: "active",
+              placement: normalizeAdPlacement(file.customMetadata?.placement),
+              displayMode: normalizeAdPlacement(file.customMetadata?.placement) === "portrait_fullscreen" ? "fullscreen" : "normal",
+              clickTarget: normalizeAdClickTarget(file.customMetadata?.clickTarget || file.customMetadata?.click_target),
+              landingUrl:
+                text(file.customMetadata?.landingUrl || file.customMetadata?.landing_url) ||
+                adLandingUrl(normalizeAdClickTarget(file.customMetadata?.clickTarget || file.customMetadata?.click_target)),
+              analysisMode: "daily_until_yesterday",
               source: "a1_storage_sync",
               syncedBy: user.uid,
               syncedAt: serverTimestamp(),
@@ -1109,6 +1229,15 @@ export default function A1Page() {
       targetRef,
       {
         ad_videos: entries,
+        adDisplayPolicy: {
+          version: 1,
+          analysisMode: "daily_until_yesterday",
+          fullscreenPlacement: "portrait_fullscreen",
+          clickTargets: {
+            hotdeal: adLandingUrl("hotdeal"),
+            luxury: adLandingUrl("luxury")
+          }
+        },
         source: "a1",
         updatedBy: user?.uid || "a1",
         updatedAt: serverTimestamp()
@@ -1128,6 +1257,15 @@ export default function A1Page() {
           doc(db, "devices", device.id),
           {
             ad_videos: entries,
+            adDisplayPolicy: {
+              version: 1,
+              analysisMode: "daily_until_yesterday",
+              fullscreenPlacement: "portrait_fullscreen",
+              clickTargets: {
+                hotdeal: adLandingUrl("hotdeal"),
+                luxury: adLandingUrl("luxury")
+              }
+            },
             source: "a1",
             updatedBy: user?.uid || "a1",
             updatedAt: serverTimestamp()
@@ -1183,7 +1321,7 @@ export default function A1Page() {
     try {
       const { db } = getFirebaseServices();
       const assetId = assetIdFromStoragePath(file.fullPath);
-      const entries = [a3AdEntryFromFile(file)];
+      const entries = [a3AdEntryFromFile(file, adPlacement, adClickTarget)];
 
       if (scope === "global") {
         await setA3PlaylistDocument(doc(db, "global_campaigns", "current_ads"), entries);
@@ -1210,6 +1348,11 @@ export default function A1Page() {
           publishedTargetBizNum: scope === "store" ? selectedBranch?.bizNum || "" : "*",
           publishedTargetName: scope === "store" ? selectedBranch?.businessName || "" : "all",
           publishedDeviceCount: scope === "store" ? targetDevices.length : devices.length,
+          placement: adPlacement,
+          displayMode: adPlacement === "portrait_fullscreen" ? "fullscreen" : "normal",
+          clickTarget: adClickTarget,
+          landingUrl: adLandingUrl(adClickTarget),
+          analysisMode: "daily_until_yesterday",
           source: "a1_storage_publish",
           updatedBy: user.uid,
           lastPublishedAt: serverTimestamp(),
@@ -1581,11 +1724,16 @@ export default function A1Page() {
                       uploadProgress={uploadProgress}
                       deliveryScope={adDeliveryScope}
                       setDeliveryScope={setAdDeliveryScope}
+                      placement={adPlacement}
+                      setPlacement={setAdPlacement}
+                      clickTarget={adClickTarget}
+                      setClickTarget={setAdClickTarget}
                       selectedBranch={selectedBranch}
                       selectedDevices={selectedDevices}
                       uploadFile={uploadStorageAdFile}
                       publishFile={publishStorageAdFile}
                       syncAssets={syncStorageAdAssets}
+                      refreshRollups={refreshAdDailyRollups}
                       deleteFile={deleteStorageAdFile}
                     />
                   )}
@@ -1987,11 +2135,16 @@ function StoragePanel({
   uploadProgress,
   deliveryScope,
   setDeliveryScope,
+  placement,
+  setPlacement,
+  clickTarget,
+  setClickTarget,
   selectedBranch,
   selectedDevices,
   uploadFile,
   publishFile,
   syncAssets,
+  refreshRollups,
   deleteFile
 }: {
   files: StorageAdFile[];
@@ -2007,11 +2160,16 @@ function StoragePanel({
   uploadProgress: number;
   deliveryScope: AdDeliveryScope;
   setDeliveryScope: (scope: AdDeliveryScope) => void;
+  placement: AdPlacement;
+  setPlacement: (placement: AdPlacement) => void;
+  clickTarget: AdClickTarget;
+  setClickTarget: (target: AdClickTarget) => void;
   selectedBranch?: Branch;
   selectedDevices: Device[];
   uploadFile: (file: File | null) => void;
   publishFile: (file: StorageAdFile) => void;
   syncAssets: () => void;
+  refreshRollups: () => void;
   deleteFile: (file: StorageAdFile) => void;
 }) {
   return (
@@ -2052,6 +2210,33 @@ function StoragePanel({
                     ? "A3 전체 공통 경로(global_campaigns/current_ads.ad_videos)에 URL을 반영합니다."
                     : `${selectedBranch?.businessName || selectedBranch?.bizNum || "선택 매장"} · 연결 A3 ${selectedDevices.length}대`}
                 </p>
+              </div>
+              <div className="scope-options">
+                <div className="scope-box">
+                  <p className="scope-label">광고 구역</p>
+                  <div className="segmented" aria-label="A3 ad placement">
+                    <button type="button" className={placement === "normal" ? "active" : ""} onClick={() => setPlacement("normal")}>
+                      기본 광고
+                    </button>
+                    <button type="button" className={placement === "portrait_fullscreen" ? "active" : ""} onClick={() => setPlacement("portrait_fullscreen")}>
+                      세로 전면
+                    </button>
+                  </div>
+                </div>
+                <div className="scope-box">
+                  <p className="scope-label">클릭 이동</p>
+                  <div className="segmented" aria-label="A3 ad click target">
+                    <button type="button" className={clickTarget === "hotdeal" ? "active" : ""} onClick={() => setClickTarget("hotdeal")}>
+                      핫딜
+                    </button>
+                    <button type="button" className={clickTarget === "luxury" ? "active" : ""} onClick={() => setClickTarget("luxury")}>
+                      명품관
+                    </button>
+                  </div>
+                  <p className="scope-summary">
+                    {adPlacementLabel(placement)} / {adClickTargetLabel(clickTarget)} / 전일까지 집계
+                  </p>
+                </div>
               </div>
             </div>
             <label className={`button primary ${!canWrite || uploading ? "disabled-like" : ""}`}>
@@ -2117,7 +2302,13 @@ function StoragePanel({
             <FileVideo size={17} />
             광고 파일 송출 집계
           </h2>
-          <span className="pill blue">{adAssets.length} assets</span>
+          <div className="toolbar">
+            <button className="button" onClick={refreshRollups} title="Refresh daily ad rollups">
+              <RefreshCw size={16} />
+              집계 갱신
+            </button>
+            <span className="pill blue">{adAssets.length} assets</span>
+          </div>
         </div>
         <div className="panel-body ad-grid">
           {adAssets.length ? (
