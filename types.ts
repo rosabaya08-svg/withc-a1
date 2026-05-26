@@ -78,6 +78,12 @@ export type AdAsset = {
   url: string;
   placement: string;
   clickTarget: string;
+  playbackMode: string;
+  dailyLimit: number;
+  scheduleStartDate: string;
+  scheduleEndDate: string;
+  scheduleStartTime: string;
+  scheduleEndTime: string;
 };
 
 export type AdPlayEvent = {

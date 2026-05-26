@@ -19,6 +19,7 @@ import {
   Power,
   RefreshCw,
   Search,
+  Settings,
   ShieldCheck,
   Store,
   Trash2,
@@ -43,7 +44,7 @@ import {
   type DocumentReference
 } from "firebase/firestore";
 import { onValue, push, ref as rtdbRef, set } from "firebase/database";
-import { deleteObject, getDownloadURL, getMetadata, listAll, ref as storageRef, uploadBytesResumable } from "firebase/storage";
+import { deleteObject, getDownloadURL, getMetadata, listAll, ref as storageRef, updateMetadata, uploadBytesResumable } from "firebase/storage";
 import { getFirebaseServices, hasFirebaseConfig } from "@/lib/firebase";
 import type { AdAsset, AdDailyRollup, AdPlayEvent, AdminProfile, AppRelease, AuditLog, Branch, Device, DevicePresence, StorageAdFile } from "@/types";
 
@@ -53,6 +54,17 @@ type SectionKey = "overview" | "stores" | "devices" | "control" | "broadcast" | 
 type AdDeliveryScope = "store" | "global";
 type AdPlacement = "normal" | "portrait_fullscreen";
 type AdClickTarget = "hotdeal" | "luxury";
+type AdPlaybackMode = "rolling" | "daily_limit";
+type AdPolicy = {
+  placement: AdPlacement;
+  clickTarget: AdClickTarget;
+  playbackMode: AdPlaybackMode;
+  dailyLimit: number;
+  scheduleStartDate: string;
+  scheduleEndDate: string;
+  scheduleStartTime: string;
+  scheduleEndTime: string;
+};
 type A3AdVideoEntry = {
   url: string;
   storagePath: string;
@@ -67,6 +79,12 @@ type A3AdVideoEntry = {
   clickTarget: AdClickTarget;
   landingUrl: string;
   analysisMode: "daily_until_yesterday";
+  playbackMode: AdPlaybackMode;
+  dailyLimit: number;
+  scheduleStartDate: string;
+  scheduleEndDate: string;
+  scheduleStartTime: string;
+  scheduleEndTime: string;
 };
 
 function text(value: unknown, fallback = "") {
@@ -88,6 +106,15 @@ function normalizeAdClickTarget(value: unknown): AdClickTarget {
   return text(value) === "luxury" ? "luxury" : "hotdeal";
 }
 
+function normalizeAdPlaybackMode(value: unknown): AdPlaybackMode {
+  return text(value) === "daily_limit" ? "daily_limit" : "rolling";
+}
+
+function normalizeDailyLimit(value: unknown) {
+  const parsed = Math.floor(numberValue(value));
+  return parsed > 0 ? parsed : 0;
+}
+
 function adLandingUrl(target: AdClickTarget) {
   return target === "luxury" ? "https://signage-ai-a5.co.kr/luxuly" : "https://signage-ai-a5.co.kr";
 }
@@ -98,6 +125,63 @@ function adPlacementLabel(placement: AdPlacement) {
 
 function adClickTargetLabel(target: AdClickTarget) {
   return target === "luxury" ? "명품관" : "핫딜";
+}
+
+function adPlaybackModeLabel(mode: AdPlaybackMode) {
+  return mode === "daily_limit" ? "하루 횟수 제한" : "단순 롤링";
+}
+
+function adPolicyFromSources(...sources: Array<Record<string, unknown> | undefined>): AdPolicy {
+  const data = Object.assign({}, ...sources.filter(Boolean));
+  return {
+    placement: normalizeAdPlacement(data.placement || data.adPlacement),
+    clickTarget: normalizeAdClickTarget(data.clickTarget || data.click_target || data.target),
+    playbackMode: normalizeAdPlaybackMode(data.playbackMode || data.playback_mode),
+    dailyLimit: normalizeDailyLimit(data.dailyLimit || data.daily_limit),
+    scheduleStartDate: text(data.scheduleStartDate || data.schedule_start_date),
+    scheduleEndDate: text(data.scheduleEndDate || data.schedule_end_date),
+    scheduleStartTime: text(data.scheduleStartTime || data.schedule_start_time),
+    scheduleEndTime: text(data.scheduleEndTime || data.schedule_end_time)
+  };
+}
+
+function adPolicyStorageMetadata(policy: AdPolicy) {
+  return {
+    placement: policy.placement,
+    displayMode: policy.placement === "portrait_fullscreen" ? "fullscreen" : "normal",
+    clickTarget: policy.clickTarget,
+    landingUrl: adLandingUrl(policy.clickTarget),
+    analysisMode: "daily_until_yesterday",
+    playbackMode: policy.playbackMode,
+    dailyLimit: String(policy.dailyLimit),
+    scheduleStartDate: policy.scheduleStartDate,
+    scheduleEndDate: policy.scheduleEndDate,
+    scheduleStartTime: policy.scheduleStartTime,
+    scheduleEndTime: policy.scheduleEndTime
+  };
+}
+
+function adPolicyFirestoreFields(policy: AdPolicy) {
+  return {
+    placement: policy.placement,
+    displayMode: policy.placement === "portrait_fullscreen" ? "fullscreen" : "normal",
+    clickTarget: policy.clickTarget,
+    landingUrl: adLandingUrl(policy.clickTarget),
+    analysisMode: "daily_until_yesterday",
+    playbackMode: policy.playbackMode,
+    dailyLimit: policy.dailyLimit,
+    scheduleStartDate: policy.scheduleStartDate,
+    scheduleEndDate: policy.scheduleEndDate,
+    scheduleStartTime: policy.scheduleStartTime,
+    scheduleEndTime: policy.scheduleEndTime
+  };
+}
+
+function adScheduleSummary(policy: AdPolicy) {
+  const count = policy.playbackMode === "daily_limit" && policy.dailyLimit > 0 ? `하루 ${policy.dailyLimit}회` : "단순 롤링";
+  const dateRange = policy.scheduleStartDate || policy.scheduleEndDate ? `${policy.scheduleStartDate || "시작"}~${policy.scheduleEndDate || "종료"}` : "상시";
+  const timeRange = policy.scheduleStartTime || policy.scheduleEndTime ? `${policy.scheduleStartTime || "00:00"}~${policy.scheduleEndTime || "23:59"}` : "전일";
+  return `${count} / ${dateRange} / ${timeRange}`;
 }
 
 function getDateKey(date: Date) {
@@ -190,9 +274,9 @@ function adEntryMatchesFile(entry: unknown, file: Pick<StorageAdFile, "url" | "f
   return false;
 }
 
-function a3AdEntryFromFile(file: StorageAdFile, placement?: AdPlacement, clickTarget?: AdClickTarget): A3AdVideoEntry {
-  const resolvedPlacement = placement ?? normalizeAdPlacement(file.customMetadata?.placement);
-  const resolvedClickTarget = clickTarget ?? normalizeAdClickTarget(file.customMetadata?.clickTarget || file.customMetadata?.click_target);
+function a3AdEntryFromFile(file: StorageAdFile, policy?: Partial<AdPolicy>): A3AdVideoEntry {
+  const sourcePolicy = adPolicyFromSources(file.customMetadata);
+  const resolvedPolicy = { ...sourcePolicy, ...policy };
   return {
     url: file.url,
     storagePath: file.fullPath,
@@ -202,11 +286,17 @@ function a3AdEntryFromFile(file: StorageAdFile, placement?: AdPlacement, clickTa
     size: file.size,
     assetId: assetIdFromStoragePath(file.fullPath),
     source: "a1_storage",
-    placement: resolvedPlacement,
-    displayMode: resolvedPlacement === "portrait_fullscreen" ? "fullscreen" : "normal",
-    clickTarget: resolvedClickTarget,
-    landingUrl: adLandingUrl(resolvedClickTarget),
-    analysisMode: "daily_until_yesterday"
+    placement: resolvedPolicy.placement,
+    displayMode: resolvedPolicy.placement === "portrait_fullscreen" ? "fullscreen" : "normal",
+    clickTarget: resolvedPolicy.clickTarget,
+    landingUrl: adLandingUrl(resolvedPolicy.clickTarget),
+    analysisMode: "daily_until_yesterday",
+    playbackMode: resolvedPolicy.playbackMode,
+    dailyLimit: resolvedPolicy.dailyLimit,
+    scheduleStartDate: resolvedPolicy.scheduleStartDate,
+    scheduleEndDate: resolvedPolicy.scheduleEndDate,
+    scheduleStartTime: resolvedPolicy.scheduleStartTime,
+    scheduleEndTime: resolvedPolicy.scheduleEndTime
   };
 }
 
@@ -231,7 +321,13 @@ function normalizeA3AdEntry(entry: unknown): A3AdVideoEntry | null {
       displayMode: normalizeAdPlacement(row.placement || row.adPlacement) === "portrait_fullscreen" ? "fullscreen" : "normal",
       clickTarget: normalizeAdClickTarget(row.clickTarget || row.click_target || row.target),
       landingUrl: text(row.landingUrl || row.landing_url) || adLandingUrl(normalizeAdClickTarget(row.clickTarget || row.click_target || row.target)),
-      analysisMode: "daily_until_yesterday"
+      analysisMode: "daily_until_yesterday",
+      playbackMode: normalizeAdPlaybackMode(row.playbackMode || row.playback_mode),
+      dailyLimit: normalizeDailyLimit(row.dailyLimit || row.daily_limit),
+      scheduleStartDate: text(row.scheduleStartDate || row.schedule_start_date),
+      scheduleEndDate: text(row.scheduleEndDate || row.schedule_end_date),
+      scheduleStartTime: text(row.scheduleStartTime || row.schedule_start_time),
+      scheduleEndTime: text(row.scheduleEndTime || row.schedule_end_time)
     };
   }
 
@@ -250,7 +346,13 @@ function normalizeA3AdEntry(entry: unknown): A3AdVideoEntry | null {
     displayMode: "normal",
     clickTarget: "hotdeal",
     landingUrl: adLandingUrl("hotdeal"),
-    analysisMode: "daily_until_yesterday"
+    analysisMode: "daily_until_yesterday",
+    playbackMode: "rolling",
+    dailyLimit: 0,
+    scheduleStartDate: "",
+    scheduleEndDate: "",
+    scheduleStartTime: "",
+    scheduleEndTime: ""
   };
 }
 
@@ -369,7 +471,13 @@ function normalizeAdAsset(id: string, data: Record<string, unknown>): AdAsset {
     targetBizNums: Array.isArray(targets) ? targets.map(String) : [],
     url: text(data.url || data.downloadUrl || data.storageUrl),
     placement: text(data.placement || data.adPlacement, "normal"),
-    clickTarget: text(data.clickTarget || data.click_target || data.target, "hotdeal")
+    clickTarget: text(data.clickTarget || data.click_target || data.target, "hotdeal"),
+    playbackMode: text(data.playbackMode || data.playback_mode, "rolling"),
+    dailyLimit: normalizeDailyLimit(data.dailyLimit || data.daily_limit),
+    scheduleStartDate: text(data.scheduleStartDate || data.schedule_start_date),
+    scheduleEndDate: text(data.scheduleEndDate || data.schedule_end_date),
+    scheduleStartTime: text(data.scheduleStartTime || data.schedule_start_time),
+    scheduleEndTime: text(data.scheduleEndTime || data.schedule_end_time)
   };
 }
 
@@ -488,7 +596,14 @@ export default function A1Page() {
   const [adDeliveryScope, setAdDeliveryScope] = useState<AdDeliveryScope>("global");
   const [adPlacement, setAdPlacement] = useState<AdPlacement>("normal");
   const [adClickTarget, setAdClickTarget] = useState<AdClickTarget>("hotdeal");
+  const [adPlaybackMode, setAdPlaybackMode] = useState<AdPlaybackMode>("rolling");
+  const [adDailyLimit, setAdDailyLimit] = useState("0");
+  const [adScheduleStartDate, setAdScheduleStartDate] = useState("");
+  const [adScheduleEndDate, setAdScheduleEndDate] = useState("");
+  const [adScheduleStartTime, setAdScheduleStartTime] = useState("");
+  const [adScheduleEndTime, setAdScheduleEndTime] = useState("");
   const [publishingStoragePath, setPublishingStoragePath] = useState("");
+  const [savingAdSettingsPath, setSavingAdSettingsPath] = useState("");
   const [uploadProgress, setUploadProgress] = useState(0);
   const [apkUploadProgress, setApkUploadProgress] = useState(0);
   const [apkVersionName, setApkVersionName] = useState("");
@@ -498,6 +613,25 @@ export default function A1Page() {
   const [errors, setErrors] = useState<string[]>([]);
 
   const firebaseReady = hasFirebaseConfig();
+
+  function currentAdPolicy(): AdPolicy {
+    const dailyLimit = normalizeDailyLimit(adDailyLimit);
+    return {
+      placement: adPlacement,
+      clickTarget: adClickTarget,
+      playbackMode: adPlaybackMode,
+      dailyLimit: adPlaybackMode === "daily_limit" ? dailyLimit : 0,
+      scheduleStartDate: adScheduleStartDate,
+      scheduleEndDate: adScheduleEndDate,
+      scheduleStartTime: adScheduleStartTime,
+      scheduleEndTime: adScheduleEndTime
+    };
+  }
+
+  function adPolicyForFile(file: StorageAdFile): AdPolicy {
+    const asset = adAssets.find((item) => item.id === assetIdFromStoragePath(file.fullPath));
+    return adPolicyFromSources(file.customMetadata, asset as unknown as Record<string, unknown> | undefined);
+  }
 
   async function refreshAdDailyRollups() {
     if (!firebaseReady || !user || !admin) return;
@@ -815,6 +949,9 @@ export default function A1Page() {
 
     try {
       const { db, storage } = getFirebaseServices();
+      const policy = currentAdPolicy();
+      const policyMetadata = adPolicyStorageMetadata(policy);
+      const policyFields = adPolicyFirestoreFields(policy);
       const safeName = file.name.replace(/[^\w.\-가-힣]/g, "_");
       const storagePath = `ad_videos/${Date.now()}_${safeName}`;
       const fileRef = storageRef(storage, storagePath);
@@ -822,11 +959,7 @@ export default function A1Page() {
         contentType: file.type || "video/mp4",
         customMetadata: {
           source: "a1",
-          placement: adPlacement,
-          displayMode: adPlacement === "portrait_fullscreen" ? "fullscreen" : "normal",
-          clickTarget: adClickTarget,
-          landingUrl: adLandingUrl(adClickTarget),
-          analysisMode: "daily_until_yesterday",
+          ...policyMetadata,
           uploadedBy: user.email || user.uid
         }
       });
@@ -856,11 +989,7 @@ export default function A1Page() {
         contentType: file.type || "video/mp4",
         size: file.size,
         status: "active",
-        placement: adPlacement,
-        displayMode: adPlacement === "portrait_fullscreen" ? "fullscreen" : "normal",
-        clickTarget: adClickTarget,
-        landingUrl: adLandingUrl(adClickTarget),
-        analysisMode: "daily_until_yesterday",
+        ...policyFields,
         source: "a1_storage_upload",
         createdBy: user.uid,
         createdAt: serverTimestamp(),
@@ -890,11 +1019,7 @@ export default function A1Page() {
           updated: new Date().toLocaleString("ko-KR"),
           url,
           customMetadata: {
-            placement: adPlacement,
-            displayMode: adPlacement === "portrait_fullscreen" ? "fullscreen" : "normal",
-            clickTarget: adClickTarget,
-            landingUrl: adLandingUrl(adClickTarget),
-            analysisMode: "daily_until_yesterday"
+            ...policyMetadata
           }
         },
         adDeliveryScope
@@ -1191,13 +1316,7 @@ export default function A1Page() {
               contentType: file.contentType,
               size: file.size,
               status: "active",
-              placement: normalizeAdPlacement(file.customMetadata?.placement),
-              displayMode: normalizeAdPlacement(file.customMetadata?.placement) === "portrait_fullscreen" ? "fullscreen" : "normal",
-              clickTarget: normalizeAdClickTarget(file.customMetadata?.clickTarget || file.customMetadata?.click_target),
-              landingUrl:
-                text(file.customMetadata?.landingUrl || file.customMetadata?.landing_url) ||
-                adLandingUrl(normalizeAdClickTarget(file.customMetadata?.clickTarget || file.customMetadata?.click_target)),
-              analysisMode: "daily_until_yesterday",
+              ...adPolicyFirestoreFields(adPolicyFromSources(file.customMetadata)),
               source: "a1_storage_sync",
               syncedBy: user.uid,
               syncedAt: serverTimestamp(),
@@ -1232,6 +1351,8 @@ export default function A1Page() {
         adDisplayPolicy: {
           version: 1,
           analysisMode: "daily_until_yesterday",
+          scheduleMode: "local_device",
+          defaultPlaybackMode: "rolling",
           fullscreenPlacement: "portrait_fullscreen",
           clickTargets: {
             hotdeal: adLandingUrl("hotdeal"),
@@ -1260,6 +1381,8 @@ export default function A1Page() {
             adDisplayPolicy: {
               version: 1,
               analysisMode: "daily_until_yesterday",
+              scheduleMode: "local_device",
+              defaultPlaybackMode: "rolling",
               fullscreenPlacement: "portrait_fullscreen",
               clickTargets: {
                 hotdeal: adLandingUrl("hotdeal"),
@@ -1319,9 +1442,17 @@ export default function A1Page() {
     setErrors([]);
 
     try {
-      const { db } = getFirebaseServices();
+      const { db, storage } = getFirebaseServices();
       const assetId = assetIdFromStoragePath(file.fullPath);
-      const entries = [a3AdEntryFromFile(file, adPlacement, adClickTarget)];
+      const policy = currentAdPolicy();
+      const entries = [a3AdEntryFromFile(file, policy)];
+      await updateMetadata(storageRef(storage, file.fullPath), {
+        customMetadata: {
+          ...(file.customMetadata || {}),
+          ...adPolicyStorageMetadata(policy),
+          updatedBy: user.email || user.uid
+        }
+      }).catch(() => undefined);
 
       if (scope === "global") {
         await setA3PlaylistDocument(doc(db, "global_campaigns", "current_ads"), entries);
@@ -1348,11 +1479,7 @@ export default function A1Page() {
           publishedTargetBizNum: scope === "store" ? selectedBranch?.bizNum || "" : "*",
           publishedTargetName: scope === "store" ? selectedBranch?.businessName || "" : "all",
           publishedDeviceCount: scope === "store" ? targetDevices.length : devices.length,
-          placement: adPlacement,
-          displayMode: adPlacement === "portrait_fullscreen" ? "fullscreen" : "normal",
-          clickTarget: adClickTarget,
-          landingUrl: adLandingUrl(adClickTarget),
-          analysisMode: "daily_until_yesterday",
+          ...adPolicyFirestoreFields(policy),
           source: "a1_storage_publish",
           updatedBy: user.uid,
           lastPublishedAt: serverTimestamp(),
@@ -1377,6 +1504,116 @@ export default function A1Page() {
       setErrors((current) => [...current, message]);
     } finally {
       setPublishingStoragePath("");
+    }
+  }
+
+  async function updateAdFilePolicyInA3Document(targetRef: DocumentReference, file: StorageAdFile, policy: AdPolicy) {
+    const snapshot = await getDoc(targetRef).catch(() => null);
+    if (!snapshot?.exists()) return;
+
+    const data = snapshot.data() as Record<string, unknown>;
+    const rawList = Array.isArray(data.ad_videos) ? data.ad_videos : [];
+    if (!rawList.length) return;
+
+    let changed = false;
+    const nextEntries = rawList
+      .map((entry) => {
+        if (adEntryMatchesFile(entry, file)) {
+          changed = true;
+          const existingUrl = adUrlFromEntry(entry);
+          return a3AdEntryFromFile({ ...file, url: file.url || existingUrl }, policy);
+        }
+        return normalizeA3AdEntry(entry);
+      })
+      .filter((entry): entry is A3AdVideoEntry => Boolean(entry));
+
+    if (!changed) return;
+
+    await setDoc(
+      targetRef,
+      {
+        ad_videos: nextEntries,
+        source: "a1",
+        updatedBy: user?.uid || "a1",
+        updatedAt: serverTimestamp()
+      },
+      { merge: true }
+    );
+  }
+
+  async function updateStorageAdFilePolicyInA3(file: StorageAdFile, policy: AdPolicy) {
+    const { db } = getFirebaseServices();
+    await updateAdFilePolicyInA3Document(doc(db, "global_campaigns", "current_ads"), file, policy).catch((error) => {
+      const message = error instanceof Error ? error.message : "global ad_videos policy update failed";
+      setErrors((current) => [...current, `global_campaigns/current_ads 설정 반영 실패: ${message}`]);
+    });
+
+    await Promise.allSettled(
+      devices.map((device) =>
+        updateAdFilePolicyInA3Document(doc(db, "devices", device.id), file, policy).catch((error) => {
+          const message = error instanceof Error ? error.message : "device ad_videos policy update failed";
+          setErrors((current) => [...current, `devices/${device.id} 설정 반영 실패: ${message}`]);
+        })
+      )
+    );
+  }
+
+  async function saveStorageAdSettings(file: StorageAdFile) {
+    if (!firebaseReady || !user || !admin || !file.fullPath) return;
+
+    setSavingAdSettingsPath(file.fullPath);
+    setErrors([]);
+
+    try {
+      const { db, storage } = getFirebaseServices();
+      const policy = currentAdPolicy();
+      const assetId = assetIdFromStoragePath(file.fullPath);
+
+      await updateMetadata(storageRef(storage, file.fullPath), {
+        customMetadata: {
+          ...(file.customMetadata || {}),
+          ...adPolicyStorageMetadata(policy),
+          updatedBy: user.email || user.uid
+        }
+      });
+
+      await setDoc(
+        doc(db, "ad_assets", assetId),
+        {
+          title: file.name,
+          name: file.name,
+          fileName: file.name,
+          storagePath: file.fullPath,
+          storageUrl: file.url,
+          url: file.url,
+          contentType: file.contentType,
+          size: file.size,
+          status: "active",
+          ...adPolicyFirestoreFields(policy),
+          source: "a1_storage_settings",
+          updatedBy: user.uid,
+          updatedAt: serverTimestamp()
+        },
+        { merge: true }
+      );
+
+      await updateStorageAdFilePolicyInA3(file, policy);
+
+      await setDoc(doc(collection(db, "a1_audit_logs")), {
+        action: "storage.ad_video.settings",
+        actorUid: user.uid,
+        actorEmail: user.email || "",
+        target: file.fullPath,
+        detail: `${file.name} / ${adPlaybackModeLabel(policy.playbackMode)} / ${adScheduleSummary(policy)}`,
+        createdAt: serverTimestamp()
+      }).catch(() => undefined);
+
+      await refreshStorageAdFiles();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "광고 설정 저장 실패";
+      setErrors((current) => [...current, message]);
+    } finally {
+      setSavingAdSettingsPath("");
     }
   }
 
@@ -1728,10 +1965,24 @@ export default function A1Page() {
                       setPlacement={setAdPlacement}
                       clickTarget={adClickTarget}
                       setClickTarget={setAdClickTarget}
+                      playbackMode={adPlaybackMode}
+                      setPlaybackMode={setAdPlaybackMode}
+                      dailyLimit={adDailyLimit}
+                      setDailyLimit={setAdDailyLimit}
+                      scheduleStartDate={adScheduleStartDate}
+                      setScheduleStartDate={setAdScheduleStartDate}
+                      scheduleEndDate={adScheduleEndDate}
+                      setScheduleEndDate={setAdScheduleEndDate}
+                      scheduleStartTime={adScheduleStartTime}
+                      setScheduleStartTime={setAdScheduleStartTime}
+                      scheduleEndTime={adScheduleEndTime}
+                      setScheduleEndTime={setAdScheduleEndTime}
+                      savingSettingsPath={savingAdSettingsPath}
                       selectedBranch={selectedBranch}
                       selectedDevices={selectedDevices}
                       uploadFile={uploadStorageAdFile}
                       publishFile={publishStorageAdFile}
+                      saveSettings={saveStorageAdSettings}
                       syncAssets={syncStorageAdAssets}
                       refreshRollups={refreshAdDailyRollups}
                       deleteFile={deleteStorageAdFile}
@@ -2139,10 +2390,24 @@ function StoragePanel({
   setPlacement,
   clickTarget,
   setClickTarget,
+  playbackMode,
+  setPlaybackMode,
+  dailyLimit,
+  setDailyLimit,
+  scheduleStartDate,
+  setScheduleStartDate,
+  scheduleEndDate,
+  setScheduleEndDate,
+  scheduleStartTime,
+  setScheduleStartTime,
+  scheduleEndTime,
+  setScheduleEndTime,
+  savingSettingsPath,
   selectedBranch,
   selectedDevices,
   uploadFile,
   publishFile,
+  saveSettings,
   syncAssets,
   refreshRollups,
   deleteFile
@@ -2164,14 +2429,42 @@ function StoragePanel({
   setPlacement: (placement: AdPlacement) => void;
   clickTarget: AdClickTarget;
   setClickTarget: (target: AdClickTarget) => void;
+  playbackMode: AdPlaybackMode;
+  setPlaybackMode: (mode: AdPlaybackMode) => void;
+  dailyLimit: string;
+  setDailyLimit: (value: string) => void;
+  scheduleStartDate: string;
+  setScheduleStartDate: (value: string) => void;
+  scheduleEndDate: string;
+  setScheduleEndDate: (value: string) => void;
+  scheduleStartTime: string;
+  setScheduleStartTime: (value: string) => void;
+  scheduleEndTime: string;
+  setScheduleEndTime: (value: string) => void;
+  savingSettingsPath: string;
   selectedBranch?: Branch;
   selectedDevices: Device[];
   uploadFile: (file: File | null) => void;
   publishFile: (file: StorageAdFile) => void;
+  saveSettings: (file: StorageAdFile) => void;
   syncAssets: () => void;
   refreshRollups: () => void;
   deleteFile: (file: StorageAdFile) => void;
 }) {
+  const assetsById = useMemo(() => new Map(adAssets.map((asset) => [asset.id, asset])), [adAssets]);
+  const policyForFile = (file: StorageAdFile) =>
+    adPolicyFromSources(file.customMetadata, assetsById.get(assetIdFromStoragePath(file.fullPath)) as unknown as Record<string, unknown> | undefined);
+  const currentPolicy: AdPolicy = {
+    placement,
+    clickTarget,
+    playbackMode,
+    dailyLimit: playbackMode === "daily_limit" ? normalizeDailyLimit(dailyLimit) : 0,
+    scheduleStartDate,
+    scheduleEndDate,
+    scheduleStartTime,
+    scheduleEndTime
+  };
+
   return (
     <div className="content-stack">
       <div className="panel">
@@ -2238,6 +2531,49 @@ function StoragePanel({
                   </p>
                 </div>
               </div>
+              <div className="scope-box">
+                <p className="scope-label">송출 방식</p>
+                <div className="segmented" aria-label="A3 ad playback mode">
+                  <button type="button" className={playbackMode === "rolling" ? "active" : ""} onClick={() => setPlaybackMode("rolling")}>
+                    단순 롤링
+                  </button>
+                  <button type="button" className={playbackMode === "daily_limit" ? "active" : ""} onClick={() => setPlaybackMode("daily_limit")}>
+                    하루 횟수 제한
+                  </button>
+                </div>
+                <p className="scope-summary">{adScheduleSummary(currentPolicy)}</p>
+              </div>
+              <div className="form-grid">
+                <label>
+                  <span>하루 송출 횟수</span>
+                  <input
+                    className="input"
+                    type="number"
+                    min="0"
+                    step="1"
+                    value={dailyLimit}
+                    onChange={(event) => setDailyLimit(event.target.value)}
+                    disabled={playbackMode === "rolling"}
+                    placeholder="0"
+                  />
+                </label>
+                <label>
+                  <span>송출 시작 일자</span>
+                  <input className="input" type="date" value={scheduleStartDate} onChange={(event) => setScheduleStartDate(event.target.value)} />
+                </label>
+                <label>
+                  <span>송출 종료 일자</span>
+                  <input className="input" type="date" value={scheduleEndDate} onChange={(event) => setScheduleEndDate(event.target.value)} />
+                </label>
+                <label>
+                  <span>송출 시작 시간</span>
+                  <input className="input" type="time" value={scheduleStartTime} onChange={(event) => setScheduleStartTime(event.target.value)} />
+                </label>
+                <label>
+                  <span>송출 종료 시간</span>
+                  <input className="input" type="time" value={scheduleEndTime} onChange={(event) => setScheduleEndTime(event.target.value)} />
+                </label>
+              </div>
             </div>
             <label className={`button primary ${!canWrite || uploading ? "disabled-like" : ""}`}>
               <Upload size={16} />
@@ -2263,13 +2599,18 @@ function StoragePanel({
         </div>
         <div className="panel-body ad-grid">
           {files.length ? (
-            files.map((file) => (
+            files.map((file) => {
+              const policy = policyForFile(file);
+              return (
               <div className="ad-row" key={file.id}>
                 <div className="truncate">
                   <p className="row-title truncate">{file.name}</p>
                   <p className="row-meta truncate">{file.fullPath}</p>
                   <p className="row-meta truncate">
                     {file.contentType} · {bytesText(file.size)} · {file.updated}
+                  </p>
+                  <p className="row-meta truncate">
+                    {adPlacementLabel(policy.placement)} / {adClickTargetLabel(policy.clickTarget)} / {adScheduleSummary(policy)}
                   </p>
                 </div>
                 <div className="pill-row">
@@ -2283,13 +2624,18 @@ function StoragePanel({
                     <Upload size={16} />
                     {publishingPath === file.fullPath ? "송출 중" : "송출"}
                   </button>
+                  <button className="button" onClick={() => saveSettings(file)} disabled={!canWrite || savingSettingsPath === file.fullPath || !file.url} title="이 광고에 현재 설정 저장">
+                    <Settings size={16} />
+                    {savingSettingsPath === file.fullPath ? "저장 중" : "설정"}
+                  </button>
                   <button className="button danger" onClick={() => deleteFile(file)} disabled={!canWrite || deletingPath === file.fullPath} title="Storage 광고 파일 삭제">
                     <Trash2 size={16} />
                     {deletingPath === file.fullPath ? "삭제 중" : "삭제"}
                   </button>
                 </div>
               </div>
-            ))
+              );
+            })
           ) : (
             <div className="empty">Firebase Storage의 `ad_videos/` 폴더에 표시할 영상이 없습니다.</div>
           )}
