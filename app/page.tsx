@@ -64,6 +64,7 @@ type AccountPurgePreview = {
   playlistRefCount: number;
   scannedAt: string;
 };
+type ProfileFallbackMap = Map<string, Record<string, unknown>>;
 type AdPolicy = {
   placement: AdPlacement;
   clickTarget: AdClickTarget;
@@ -74,6 +75,8 @@ type AdPolicy = {
   scheduleStartTime: string;
   scheduleEndTime: string;
 };
+
+const STORE_CATEGORY_LABELS = ["골프장", "카페/식당", "병원/산후조리원", "뷰티/헤어", "헬스장"];
 type A3AdVideoEntry = {
   url: string;
   storagePath: string;
@@ -100,6 +103,20 @@ function text(value: unknown, fallback = "") {
   if (value === null || value === undefined) return fallback;
   const result = String(value).trim();
   return result || fallback;
+}
+
+function normalizeStoreCategory(value: unknown, fallback = "미분류") {
+  const raw = text(value);
+  if (!raw) return fallback;
+  const compact = raw.replace(/\s+/g, "").replace(/／/g, "/");
+
+  if (compact.includes("골프")) return "골프장";
+  if (compact.includes("카페") || compact.includes("식당") || compact.includes("음식")) return "카페/식당";
+  if (compact.includes("병원") || compact.includes("산후") || compact.includes("조리원")) return "병원/산후조리원";
+  if (compact.includes("뷰티") || compact.includes("헤어") || compact.includes("미용")) return "뷰티/헤어";
+  if (compact.includes("헬스") || compact.includes("피트니스") || compact.includes("휘트니스") || compact.includes("짐")) return "헬스장";
+
+  return raw;
 }
 
 function numberValue(value: unknown) {
@@ -489,10 +506,10 @@ function parseA3ApkInfo(file: StorageAdFile) {
   return { versionName: "", versionCode: 0 };
 }
 
-function normalizeBranch(id: string, data: Record<string, unknown>): Branch {
+function normalizeBranch(id: string, data: Record<string, unknown>, profileData: Record<string, unknown> = {}): Branch {
   const a4Status = text(data.a4_status || data.a4Status, "active") === "suspended" ? "suspended" : "active";
-  const accountStatus = text(data.account_status || data.accountStatus, "active") === "suspended" ? "suspended" : "active";
-  const bizNum = text(data.bizNum || data.businessNumber || data.business_registration_number, id);
+  const accountStatus = text(data.account_status || data.accountStatus || profileData.account_status || profileData.accountStatus, "active") === "suspended" ? "suspended" : "active";
+  const bizNum = text(data.bizNum || data.businessNumber || data.business_registration_number || profileData.bizNum || profileData.businessNumber || profileData.business_registration_number, id);
   const businessName = text(
     data.store_name ||
       data.businessName ||
@@ -501,39 +518,68 @@ function normalizeBranch(id: string, data: Record<string, unknown>): Branch {
       data.company_name ||
       data.storeName ||
       data.shopName ||
-      data.name,
+      data.name ||
+      profileData.store_name ||
+      profileData.businessName ||
+      profileData.business_name ||
+      profileData.companyName ||
+      profileData.company_name ||
+      profileData.storeName ||
+      profileData.shopName ||
+      profileData.name,
     id
   );
-  const address = text(data.address || data.store_address || data.roadAddress || data.road_address);
+  const address = text(data.address || data.store_address || data.roadAddress || data.road_address || profileData.address || profileData.store_address || profileData.roadAddress || profileData.road_address);
   const derivedRegion = deriveRegionFromAddress(address);
-  const regionSido = text(data.regionSido || data.region_sido, derivedRegion.regionSido);
-  const regionUnit = text(data.regionUnit || data.region_unit, derivedRegion.regionUnit);
+  const regionSido = text(data.regionSido || data.region_sido || profileData.regionSido || profileData.region_sido, derivedRegion.regionSido);
+  const regionUnit = text(data.regionUnit || data.region_unit || profileData.regionUnit || profileData.region_unit, derivedRegion.regionUnit);
+  const category = normalizeStoreCategory(data.category || data.store_category || data.businessCategory || data.business_category || profileData.category || profileData.store_category || profileData.businessCategory || profileData.business_category);
 
   return {
     id,
     bizNum,
     businessName,
-    storeName: text(data.store_name || data.storeName || data.shopName || data.name || data.businessName || data.business_name, businessName),
-    ownerUid: text(data.ownerUid || data.owner_uid),
-    category: text(data.category || data.store_category || data.businessCategory || data.business_category, "미분류"),
+    storeName: text(data.store_name || data.storeName || data.shopName || data.name || data.businessName || data.business_name || profileData.store_name || profileData.storeName || profileData.shopName || profileData.name || profileData.businessName || profileData.business_name, businessName),
+    ownerUid: text(data.ownerUid || data.owner_uid || profileData.ownerUid || profileData.owner_uid || profileData.uid || profileData.id),
+    category,
     address,
     regionSido,
     regionUnit,
-    regionKey: text(data.regionKey || data.region_key, [regionSido, regionUnit].filter(Boolean).join(" ")),
+    regionKey: text(data.regionKey || data.region_key || profileData.regionKey || profileData.region_key, [regionSido, regionUnit].filter(Boolean).join(" ")),
     status: text(data.status, "active"),
     accountStatus,
-    accountSuspendedReason: text(data.account_suspended_reason || data.accountSuspendedReason),
-    accountSuspendedAt: dateText(data.account_suspended_at || data.accountSuspendedAt),
-    accountSuspendedBy: text(data.account_suspended_by || data.accountSuspendedBy),
-    accountResumedAt: dateText(data.account_resumed_at || data.accountResumedAt),
+    accountSuspendedReason: text(data.account_suspended_reason || data.accountSuspendedReason || profileData.account_suspended_reason || profileData.accountSuspendedReason),
+    accountSuspendedAt: dateText(data.account_suspended_at || data.accountSuspendedAt || profileData.account_suspended_at || profileData.accountSuspendedAt),
+    accountSuspendedBy: text(data.account_suspended_by || data.accountSuspendedBy || profileData.account_suspended_by || profileData.accountSuspendedBy),
+    accountResumedAt: dateText(data.account_resumed_at || data.accountResumedAt || profileData.account_resumed_at || profileData.accountResumedAt),
     a4Status,
     a4SuspendedReason: text(data.a4_suspended_reason || data.a4SuspendedReason),
     a4SuspendedAt: dateText(data.a4_suspended_at || data.a4SuspendedAt),
     a4SuspendedBy: text(data.a4_suspended_by || data.a4SuspendedBy),
     resumedAt: dateText(data.a4_resumed_at || data.a4ResumedAt),
     authorizedAdmins: Array.isArray(data.authorized_admins) ? data.authorized_admins.map(String) : [],
-    raw: data
+    raw: { ...profileData, ...data, category }
   };
+}
+
+function buildBranchesFromSnapshots(businessDocs: ProfileFallbackMap, userDocs: ProfileFallbackMap) {
+  const usersByBizNum = new Map<string, Record<string, unknown>>();
+  userDocs.forEach((profileData, uid) => {
+    const bizNum = text(profileData.bizNum || profileData.businessNumber || profileData.business_registration_number);
+    if (bizNum && !usersByBizNum.has(bizNum)) {
+      usersByBizNum.set(bizNum, { ...profileData, uid });
+    }
+  });
+
+  const rows = Array.from(businessDocs.entries()).map(([id, data]) => {
+    const ownerUid = text(data.ownerUid || data.owner_uid);
+    const bizNum = text(data.bizNum || data.businessNumber || data.business_registration_number, id);
+    const profileData = (ownerUid && userDocs.get(ownerUid)) || usersByBizNum.get(bizNum) || {};
+    return normalizeBranch(id, data, profileData);
+  });
+
+  rows.sort((a, b) => a.businessName.localeCompare(b.businessName, "ko-KR"));
+  return rows;
 }
 
 function normalizeDevice(id: string, data: Record<string, unknown>): Device {
@@ -862,17 +908,34 @@ export default function A1Page() {
     if (!firebaseReady || !user || !admin) return;
     const { db } = getFirebaseServices();
     const unsubscribers: Array<() => void> = [];
+    let businessDocs: ProfileFallbackMap = new Map();
+    let userDocs: ProfileFallbackMap = new Map();
+
+    const rebuildBranches = () => {
+      const rows = buildBranchesFromSnapshots(businessDocs, userDocs);
+      setBranches(rows);
+      setSelectedBizNum((current) => (current && rows.some((row) => row.bizNum === current) ? current : rows[0]?.bizNum || ""));
+    };
 
     unsubscribers.push(
       onSnapshot(
         query(collection(db, "businesses"), limit(300)),
         (snapshot) => {
-          const rows = snapshot.docs.map((item) => normalizeBranch(item.id, item.data()));
-          rows.sort((a, b) => a.businessName.localeCompare(b.businessName, "ko-KR"));
-          setBranches(rows);
-          setSelectedBizNum((current) => current || rows[0]?.bizNum || "");
+          businessDocs = new Map(snapshot.docs.map((item) => [item.id, item.data()]));
+          rebuildBranches();
         },
         (error) => setErrors((current) => [...current, `businesses 조회 실패: ${error.message}`])
+      )
+    );
+
+    unsubscribers.push(
+      onSnapshot(
+        query(collection(db, "users"), limit(800)),
+        (snapshot) => {
+          userDocs = new Map(snapshot.docs.map((item) => [item.id, { ...item.data(), uid: item.id, id: item.id }]));
+          rebuildBranches();
+        },
+        (error) => setErrors((current) => [...current, `users 프로필 조회 실패: ${error.message}`])
       )
     );
 
@@ -1010,7 +1073,9 @@ export default function A1Page() {
   }, [branches]);
 
   const adCategoryOptions = useMemo(() => {
-    return Array.from(new Set(branches.map((branch) => branch.category).filter(Boolean))).sort((a, b) => a.localeCompare(b, "ko-KR"));
+    const discovered = Array.from(new Set(branches.map((branch) => branch.category).filter(Boolean)));
+    const extras = discovered.filter((category) => !STORE_CATEGORY_LABELS.includes(category)).sort((a, b) => a.localeCompare(b, "ko-KR"));
+    return [...STORE_CATEGORY_LABELS, ...extras];
   }, [branches]);
 
   useEffect(() => {
@@ -1018,7 +1083,9 @@ export default function A1Page() {
   }, [adRegionOptions, selectedAdRegionKey]);
 
   useEffect(() => {
-    if (!selectedAdCategory && adCategoryOptions.length) setSelectedAdCategory(adCategoryOptions[0]);
+    if (adCategoryOptions.length && (!selectedAdCategory || !adCategoryOptions.includes(selectedAdCategory))) {
+      setSelectedAdCategory(adCategoryOptions[0]);
+    }
   }, [adCategoryOptions, selectedAdCategory]);
 
   const adTargetBranches = useMemo(() => {
