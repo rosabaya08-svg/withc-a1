@@ -11,6 +11,11 @@ service cloud.firestore {
         && request.auth.token.email == "rosabaya08@gmail.com";
     }
 
+    function accountIsActive(uid) {
+      return !exists(/databases/$(database)/documents/users/$(uid))
+        || get(/databases/$(database)/documents/users/$(uid)).data.account_status != "suspended";
+    }
+
     match /global_admins/{adminId} {
       allow read: if isSignedIn();
       allow create, update, delete: if isA1Master();
@@ -66,7 +71,7 @@ service cloud.firestore {
 
     match /businesses/{bizNum} {
       allow read: if true;
-      allow create, update: if true;
+      allow create, update: if isA1Master() || (isSignedIn() && accountIsActive(request.auth.uid));
       allow delete: if isA1Master();
 
       match /{document=**} {
@@ -78,7 +83,7 @@ service cloud.firestore {
 
     match /users/{userId} {
       allow read: if true;
-      allow create, update: if true;
+      allow create, update: if isA1Master() || (request.auth != null && request.auth.uid == userId && accountIsActive(userId));
       allow delete: if isA1Master();
     }
 

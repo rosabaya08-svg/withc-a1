@@ -4,7 +4,17 @@ export type Branch = {
   businessName: string;
   storeName: string;
   ownerUid: string;
+  category: string;
+  address: string;
+  regionSido: string;
+  regionUnit: string;
+  regionKey: string;
   status: string;
+  accountStatus: "active" | "suspended";
+  accountSuspendedReason: string;
+  accountSuspendedAt: string;
+  accountSuspendedBy: string;
+  accountResumedAt: string;
   a4Status: "active" | "suspended";
   a4SuspendedReason: string;
   a4SuspendedAt: string;

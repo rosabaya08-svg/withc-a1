@@ -2,13 +2,18 @@ rules_version = '2';
 
 service firebase.storage {
   match /b/{bucket}/o {
-    function isSignedIn() {
-      return request.auth != null;
-    }
-
     function isA1Master() {
       return request.auth != null
         && request.auth.token.email == "rosabaya08@gmail.com";
+    }
+
+    function userIsActive(uid) {
+      return request.auth != null
+        && request.auth.uid == uid
+        && (
+          !firestore.exists(/databases/(default)/documents/users/$(uid)) ||
+          firestore.get(/databases/(default)/documents/users/$(uid)).data.account_status != "suspended"
+        );
     }
 
     match /ad_videos/{fileName=**} {
@@ -27,9 +32,12 @@ service firebase.storage {
       allow delete: if isA1Master();
     }
 
-    match /user_uploads/{fileName=**} {
-      allow read, create, update: if true;
-      allow delete: if isA1Master() || isSignedIn();
+    match /user_uploads/{uid}/{fileName=**} {
+      allow read: if true;
+      allow create, update: if userIsActive(uid)
+        && request.resource.size < 250 * 1024 * 1024
+        && (request.resource.contentType.matches('image/.*') || request.resource.contentType.matches('video/.*'));
+      allow delete: if isA1Master() || userIsActive(uid);
     }
 
     match /{allPaths=**} {

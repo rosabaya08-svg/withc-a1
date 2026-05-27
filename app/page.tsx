@@ -43,17 +43,27 @@ import {
   type DocumentReference
 } from "firebase/firestore";
 import { onValue, push, ref as rtdbRef, set } from "firebase/database";
-import { deleteObject, getDownloadURL, getMetadata, listAll, ref as storageRef, updateMetadata, uploadBytesResumable } from "firebase/storage";
+import { deleteObject, getDownloadURL, getMetadata, listAll, ref as storageRef, updateMetadata, uploadBytesResumable, type StorageReference } from "firebase/storage";
 import { getFirebaseServices, hasFirebaseConfig } from "@/lib/firebase";
 import type { AdAsset, AdDailyRollup, AdPlayEvent, AdminProfile, AppRelease, AuditLog, Branch, Device, DevicePresence, StorageAdFile } from "@/types";
 
 const MASTER_EMAIL_HASH = "a4f828fbd0b0d2fb38524e2c80f88357b40ea9e06bdb0604f23278af8049ee1d";
 
 type SectionKey = "overview" | "stores" | "devices" | "control" | "broadcast" | "storage" | "releases" | "database" | "audit";
-type AdDeliveryScope = "store" | "global";
+type AdDeliveryScope = "store" | "global" | "region" | "category" | "segment";
+type AdTargetMode = AdDeliveryScope;
 type AdPlacement = "normal" | "portrait_fullscreen";
 type AdClickTarget = "hotdeal" | "luxury";
 type AdPlaybackMode = "rolling" | "daily_limit";
+type AccountPurgePreview = {
+  uid: string;
+  bizNum: string;
+  storageFiles: StorageAdFile[];
+  totalBytes: number;
+  deviceCount: number;
+  playlistRefCount: number;
+  scannedAt: string;
+};
 type AdPolicy = {
   placement: AdPlacement;
   clickTarget: AdClickTarget;
@@ -128,6 +138,14 @@ function adClickTargetLabel(target: AdClickTarget) {
 
 function adPlaybackModeLabel(mode: AdPlaybackMode) {
   return mode === "daily_limit" ? "하루 횟수 제한" : "단순 롤링";
+}
+
+function adDeliveryScopeLabel(scope: AdDeliveryScope) {
+  if (scope === "global") return "전체";
+  if (scope === "region") return "권역별";
+  if (scope === "category") return "카테고리별";
+  if (scope === "segment") return "권역+카테고리";
+  return "선택 매장";
 }
 
 function adPolicyFromSources(...sources: Array<Record<string, unknown> | undefined>): AdPolicy {
@@ -236,6 +254,40 @@ function bytesText(value: number) {
   return `${value} B`;
 }
 
+function normalizeSido(value: string) {
+  if (!value) return "";
+  if (value === "서울") return "서울특별시";
+  if (value === "경기") return "경기도";
+  if (value === "인천") return "인천광역시";
+  if (value === "부산") return "부산광역시";
+  if (value === "대구") return "대구광역시";
+  if (value === "대전") return "대전광역시";
+  if (value === "광주") return "광주광역시";
+  if (value === "울산") return "울산광역시";
+  if (value === "세종") return "세종특별자치시";
+  return value;
+}
+
+function deriveRegionFromAddress(address: string) {
+  const tokens = address.replace(/\s+/g, " ").trim().split(" ").filter(Boolean);
+  const sido = normalizeSido(tokens[0] || "");
+  if (!sido) return { regionSido: "", regionUnit: "", regionKey: "" };
+
+  const isMetro = sido.includes("특별시") || sido.includes("광역시");
+  const unit =
+    sido.includes("서울")
+      ? tokens.find((token) => token.endsWith("구")) || tokens[1] || ""
+      : isMetro
+        ? tokens.find((token, index) => index > 0 && (token.endsWith("구") || token.endsWith("군"))) || tokens[1] || ""
+        : tokens.find((token, index) => index > 0 && (token.endsWith("시") || token.endsWith("군"))) || tokens[1] || "";
+
+  return {
+    regionSido: sido,
+    regionUnit: unit,
+    regionKey: [sido, unit].filter(Boolean).join(" ")
+  };
+}
+
 function assetIdFromStoragePath(storagePath: string) {
   return storagePath.replace(/[/.]/g, "_");
 }
@@ -263,6 +315,55 @@ function storagePathFromFirebaseUrl(url: string) {
     return "";
   }
   return "";
+}
+
+function uploadEntryMatchesFile(entry: unknown, storagePaths: Set<string>, urls: Set<string>) {
+  const url = adUrlFromEntry(entry);
+  const entryStoragePath =
+    typeof entry === "object" && entry !== null
+      ? text((entry as Record<string, unknown>).storagePath || (entry as Record<string, unknown>).storage_path || (entry as Record<string, unknown>).fullPath)
+      : "";
+  return Boolean(
+    (url && urls.has(url)) ||
+      (url && storagePaths.has(storagePathFromFirebaseUrl(url))) ||
+      (entryStoragePath && storagePaths.has(entryStoragePath))
+  );
+}
+
+function filterUploadedMediaList(list: unknown, files: StorageAdFile[]) {
+  if (!Array.isArray(list)) return [];
+  const storagePaths = new Set(files.map((file) => file.fullPath));
+  const urls = new Set(files.map((file) => file.url).filter(Boolean));
+  return list.filter((entry) => !uploadEntryMatchesFile(entry, storagePaths, urls));
+}
+
+function countUploadedMediaRefs(list: unknown, files: StorageAdFile[]) {
+  if (!Array.isArray(list)) return 0;
+  const storagePaths = new Set(files.map((file) => file.fullPath));
+  const urls = new Set(files.map((file) => file.url).filter(Boolean));
+  return list.filter((entry) => uploadEntryMatchesFile(entry, storagePaths, urls)).length;
+}
+
+async function listStorageFilesRecursive(root: StorageReference): Promise<StorageAdFile[]> {
+  const result = await listAll(root);
+  const files = await Promise.all(
+    result.items.map(async (item) => {
+      const [metadata, url] = await Promise.all([getMetadata(item), getDownloadURL(item).catch(() => "")]);
+      return {
+        id: item.fullPath,
+        name: item.name,
+        fullPath: item.fullPath,
+        bucket: item.bucket,
+        contentType: metadata.contentType || "-",
+        size: metadata.size || 0,
+        updated: metadata.updated ? new Date(metadata.updated).toLocaleString("ko-KR") : "-",
+        url,
+        customMetadata: metadata.customMetadata || {}
+      };
+    })
+  );
+  const nested = await Promise.all(result.prefixes.map((prefix) => listStorageFilesRecursive(prefix)));
+  return [...files, ...nested.flat()];
 }
 
 function adEntryMatchesFile(entry: unknown, file: Pick<StorageAdFile, "url" | "fullPath">) {
@@ -390,6 +491,7 @@ function parseA3ApkInfo(file: StorageAdFile) {
 
 function normalizeBranch(id: string, data: Record<string, unknown>): Branch {
   const a4Status = text(data.a4_status || data.a4Status, "active") === "suspended" ? "suspended" : "active";
+  const accountStatus = text(data.account_status || data.accountStatus, "active") === "suspended" ? "suspended" : "active";
   const bizNum = text(data.bizNum || data.businessNumber || data.business_registration_number, id);
   const businessName = text(
     data.store_name ||
@@ -402,6 +504,10 @@ function normalizeBranch(id: string, data: Record<string, unknown>): Branch {
       data.name,
     id
   );
+  const address = text(data.address || data.store_address || data.roadAddress || data.road_address);
+  const derivedRegion = deriveRegionFromAddress(address);
+  const regionSido = text(data.regionSido || data.region_sido, derivedRegion.regionSido);
+  const regionUnit = text(data.regionUnit || data.region_unit, derivedRegion.regionUnit);
 
   return {
     id,
@@ -409,7 +515,17 @@ function normalizeBranch(id: string, data: Record<string, unknown>): Branch {
     businessName,
     storeName: text(data.store_name || data.storeName || data.shopName || data.name || data.businessName || data.business_name, businessName),
     ownerUid: text(data.ownerUid || data.owner_uid),
+    category: text(data.category || data.store_category || data.businessCategory || data.business_category, "미분류"),
+    address,
+    regionSido,
+    regionUnit,
+    regionKey: text(data.regionKey || data.region_key, [regionSido, regionUnit].filter(Boolean).join(" ")),
     status: text(data.status, "active"),
+    accountStatus,
+    accountSuspendedReason: text(data.account_suspended_reason || data.accountSuspendedReason),
+    accountSuspendedAt: dateText(data.account_suspended_at || data.accountSuspendedAt),
+    accountSuspendedBy: text(data.account_suspended_by || data.accountSuspendedBy),
+    accountResumedAt: dateText(data.account_resumed_at || data.accountResumedAt),
     a4Status,
     a4SuspendedReason: text(data.a4_suspended_reason || data.a4SuspendedReason),
     a4SuspendedAt: dateText(data.a4_suspended_at || data.a4SuspendedAt),
@@ -610,6 +726,9 @@ export default function A1Page() {
   const [deletingApkPath, setDeletingApkPath] = useState("");
   const [deployingApkPath, setDeployingApkPath] = useState("");
   const [selectedStorageAdPath, setSelectedStorageAdPath] = useState("");
+  const [adTargetMode, setAdTargetMode] = useState<AdTargetMode>("global");
+  const [selectedAdRegionKey, setSelectedAdRegionKey] = useState("");
+  const [selectedAdCategory, setSelectedAdCategory] = useState("");
   const [adPlacement, setAdPlacement] = useState<AdPlacement>("normal");
   const [adClickTarget, setAdClickTarget] = useState<AdClickTarget>("hotdeal");
   const [adPlaybackMode, setAdPlaybackMode] = useState<AdPlaybackMode>("rolling");
@@ -626,6 +745,11 @@ export default function A1Page() {
   const [apkVersionCode, setApkVersionCode] = useState("");
   const [apkReleaseNote, setApkReleaseNote] = useState("");
   const [apkForceUpdate, setApkForceUpdate] = useState(true);
+  const [accountPurgePreview, setAccountPurgePreview] = useState<AccountPurgePreview | null>(null);
+  const [scanningAccountUploads, setScanningAccountUploads] = useState(false);
+  const [purgingAccountUploads, setPurgingAccountUploads] = useState(false);
+  const [accountActionLoading, setAccountActionLoading] = useState(false);
+  const [purgeConfirmText, setPurgeConfirmText] = useState("");
   const [errors, setErrors] = useState<string[]>([]);
 
   const firebaseReady = hasFirebaseConfig();
@@ -863,11 +987,16 @@ export default function A1Page() {
   const branchByBizNum = useMemo(() => new Map(branches.map((branch) => [branch.bizNum, branch])), [branches]);
   const selectedBranch = branchByBizNum.get(selectedBizNum) || branches[0];
 
+  useEffect(() => {
+    setAccountPurgePreview(null);
+    setPurgeConfirmText("");
+  }, [selectedBranch?.ownerUid, selectedBranch?.bizNum]);
+
   const filteredBranches = useMemo(() => {
     const keyword = search.trim().toLowerCase();
     if (!keyword) return branches;
     return branches.filter((branch) => {
-      return `${branch.bizNum} ${branch.businessName} ${branch.storeName} ${branch.ownerUid} ${branch.status} ${branch.a4Status}`.toLowerCase().includes(keyword);
+      return `${branch.bizNum} ${branch.businessName} ${branch.storeName} ${branch.ownerUid} ${branch.category} ${branch.address} ${branch.regionKey} ${branch.status} ${branch.accountStatus} ${branch.a4Status}`.toLowerCase().includes(keyword);
     });
   }, [branches, search]);
 
@@ -875,6 +1004,44 @@ export default function A1Page() {
     if (!selectedBranch) return [];
     return devices.filter((device) => device.bizNum === selectedBranch.bizNum || device.ownerUid === selectedBranch.ownerUid);
   }, [devices, selectedBranch]);
+
+  const adRegionOptions = useMemo(() => {
+    return Array.from(new Set(branches.map((branch) => branch.regionKey).filter(Boolean))).sort((a, b) => a.localeCompare(b, "ko-KR"));
+  }, [branches]);
+
+  const adCategoryOptions = useMemo(() => {
+    return Array.from(new Set(branches.map((branch) => branch.category).filter(Boolean))).sort((a, b) => a.localeCompare(b, "ko-KR"));
+  }, [branches]);
+
+  useEffect(() => {
+    if (!selectedAdRegionKey && adRegionOptions.length) setSelectedAdRegionKey(adRegionOptions[0]);
+  }, [adRegionOptions, selectedAdRegionKey]);
+
+  useEffect(() => {
+    if (!selectedAdCategory && adCategoryOptions.length) setSelectedAdCategory(adCategoryOptions[0]);
+  }, [adCategoryOptions, selectedAdCategory]);
+
+  const adTargetBranches = useMemo(() => {
+    if (adTargetMode === "global") return branches;
+    if (adTargetMode === "store") return selectedBranch ? [selectedBranch] : [];
+    if (adTargetMode === "region") return branches.filter((branch) => branch.regionKey === selectedAdRegionKey);
+    if (adTargetMode === "category") return branches.filter((branch) => branch.category === selectedAdCategory);
+    return branches.filter((branch) => branch.regionKey === selectedAdRegionKey && branch.category === selectedAdCategory);
+  }, [adTargetMode, branches, selectedAdCategory, selectedAdRegionKey, selectedBranch]);
+
+  const adTargetDevices = useMemo(() => {
+    const bizNums = new Set(adTargetBranches.map((branch) => branch.bizNum).filter(Boolean));
+    const ownerUids = new Set(adTargetBranches.map((branch) => branch.ownerUid).filter(Boolean));
+    return devices.filter((device) => bizNums.has(device.bizNum) || ownerUids.has(device.ownerUid));
+  }, [adTargetBranches, devices]);
+
+  const adTargetLabel = useMemo(() => {
+    if (adTargetMode === "global") return "전체 매장";
+    if (adTargetMode === "store") return selectedBranch?.businessName || selectedBranch?.bizNum || "선택 매장";
+    if (adTargetMode === "region") return selectedAdRegionKey || "권역 미선택";
+    if (adTargetMode === "category") return selectedAdCategory || "카테고리 미선택";
+    return [selectedAdRegionKey, selectedAdCategory].filter(Boolean).join(" / ") || "권역+카테고리 미선택";
+  }, [adTargetMode, selectedAdCategory, selectedAdRegionKey, selectedBranch]);
 
   const selectedAdEvents = useMemo(() => {
     if (!selectedBranch) return [];
@@ -1452,9 +1619,13 @@ export default function A1Page() {
       return;
     }
 
-    const targetDevices = scope === "store" ? selectedDevices : [];
-    if (scope === "store" && !targetDevices.length) {
-      setErrors((current) => [...current, "선택 매장에 연결된 A3 기기가 없어 광고 URL을 반영하지 못했습니다."]);
+      const targetDevices = scope === "global" ? [] : adTargetDevices;
+      const targetBranches = scope === "global" ? branches : adTargetBranches;
+      const targetBizNums = targetBranches.map((branch) => branch.bizNum).filter(Boolean);
+      const targetOwnerUids = targetBranches.map((branch) => branch.ownerUid).filter(Boolean);
+      const targetName = scope === "global" ? "전체 매장" : adTargetLabel;
+      if (scope !== "global" && !targetDevices.length) {
+      setErrors((current) => [...current, `${adDeliveryScopeLabel(scope)} 대상에 연결된 A3 기기가 없어 광고 URL을 반영하지 못했습니다.`]);
       return;
     }
 
@@ -1493,9 +1664,13 @@ export default function A1Page() {
           status: "active",
           published: true,
           publishedScope: scope,
-          publishedTargetBizNum: scope === "store" ? selectedBranch?.bizNum || "" : "*",
-          publishedTargetName: scope === "store" ? selectedBranch?.businessName || "" : "all",
-          publishedDeviceCount: scope === "store" ? targetDevices.length : devices.length,
+          publishedTargetBizNums: scope === "global" ? ["*"] : targetBizNums,
+          publishedTargetOwnerUids: scope === "global" ? ["*"] : targetOwnerUids,
+          publishedTargetRegionKey: scope === "region" || scope === "segment" ? selectedAdRegionKey : "",
+          publishedTargetCategory: scope === "category" || scope === "segment" ? selectedAdCategory : "",
+          publishedTargetName: targetName,
+          publishedStoreCount: scope === "global" ? branches.length : targetBranches.length,
+          publishedDeviceCount: scope === "global" ? devices.length : targetDevices.length,
           ...adPolicyFirestoreFields(policy),
           source: "a1_storage_publish",
           updatedBy: user.uid,
@@ -1513,7 +1688,7 @@ export default function A1Page() {
         actorUid: user.uid,
         actorEmail: user.email || "",
         target: scope === "global" ? "global_campaigns/current_ads" : `devices/${targetDevices.length}`,
-        detail: `${file.name} -> ${scope === "global" ? "전체 A3" : `${selectedBranch?.businessName || selectedBranch?.bizNum || "-"} / ${targetDevices.length}대`} playlist upsert`,
+        detail: `${file.name} -> ${adDeliveryScopeLabel(scope)} ${targetName} / 매장 ${targetBranches.length}개 / A3 ${scope === "global" ? devices.length : targetDevices.length}대 playlist upsert`,
         createdAt: serverTimestamp()
       }).catch(() => undefined);
 
@@ -1770,6 +1945,226 @@ export default function A1Page() {
     }
   }
 
+  async function scanSelectedAccountUploads() {
+    if (!firebaseReady || !user || !admin || !selectedBranch?.ownerUid) return;
+
+    setScanningAccountUploads(true);
+    setErrors([]);
+
+    try {
+      const { db, storage } = getFirebaseServices();
+      const uid = selectedBranch.ownerUid;
+      const files = await listStorageFilesRecursive(storageRef(storage, `user_uploads/${uid}`));
+      files.sort((a, b) => b.updated.localeCompare(a.updated, "ko-KR"));
+
+      const [userSnap, deviceSnap] = await Promise.all([
+        getDoc(doc(db, "users", uid)).catch(() => null),
+        getDocs(query(collection(db, "devices"), where("owner_uid", "==", uid))).catch(() => null)
+      ]);
+
+      const userData = userSnap?.exists() ? (userSnap.data() as Record<string, unknown>) : {};
+      let playlistRefCount = countUploadedMediaRefs(userData.master_playlist, files) + countUploadedMediaRefs(userData.playlist, files);
+      deviceSnap?.docs.forEach((deviceDoc) => {
+        const data = deviceDoc.data() as Record<string, unknown>;
+        playlistRefCount += countUploadedMediaRefs(data.playlist, files);
+        playlistRefCount += countUploadedMediaRefs(data.ad_videos, files);
+      });
+
+      setAccountPurgePreview({
+        uid,
+        bizNum: selectedBranch.bizNum,
+        storageFiles: files,
+        totalBytes: files.reduce((sum, file) => sum + file.size, 0),
+        deviceCount: deviceSnap?.docs.length || 0,
+        playlistRefCount,
+        scannedAt: new Date().toLocaleString("ko-KR")
+      });
+      setPurgeConfirmText("");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "계정 업로드 자료 스캔 실패";
+      setErrors((current) => [...current, message]);
+    } finally {
+      setScanningAccountUploads(false);
+    }
+  }
+
+  async function changeAccountStatus(nextStatus: "active" | "suspended") {
+    if (!firebaseReady || !user || !admin || !selectedBranch?.ownerUid) return;
+
+    const detail = nextStatus === "suspended" ? reason.trim() || "관리자 계정 정지 처리" : "관리자 계정 정지 해제";
+    setAccountActionLoading(true);
+    setErrors([]);
+
+    try {
+      const { db, rtdb } = getFirebaseServices();
+      const uid = selectedBranch.ownerUid;
+      const deviceSnap = await getDocs(query(collection(db, "devices"), where("owner_uid", "==", uid))).catch(() => null);
+      const branchRefs = Array.from(new Set([selectedBranch.id, selectedBranch.bizNum].filter(Boolean))).map((id) => doc(db, "businesses", id));
+
+      const accountFields =
+        nextStatus === "suspended"
+          ? {
+              account_status: "suspended",
+              accountStatus: "suspended",
+              account_suspended_reason: detail,
+              account_suspended_at: serverTimestamp(),
+              account_suspended_by: user.uid,
+              updated_at: serverTimestamp()
+            }
+          : {
+              account_status: "active",
+              accountStatus: "active",
+              account_resumed_at: serverTimestamp(),
+              account_resumed_by: user.uid,
+              updated_at: serverTimestamp()
+            };
+
+      await Promise.all([
+        setDoc(doc(db, "users", uid), accountFields, { merge: true }),
+        ...branchRefs.map((branchRef) => setDoc(branchRef, accountFields, { merge: true })),
+        ...(deviceSnap?.docs || []).map((deviceDoc) => setDoc(deviceDoc.ref, accountFields, { merge: true }))
+      ]);
+
+      await setDoc(doc(collection(db, "a1_audit_logs")), {
+        action: nextStatus === "suspended" ? "account.suspend" : "account.resume",
+        actorUid: user.uid,
+        actorEmail: user.email || "",
+        target: uid,
+        detail: `${selectedBranch.businessName} / ${selectedBranch.bizNum} / ${detail}`,
+        createdAt: serverTimestamp()
+      }).catch(() => undefined);
+
+      await set(push(rtdbRef(rtdb, `businesses/${selectedBranch.bizNum}/signals`)), {
+        type: "account_status",
+        status: nextStatus,
+        ownerUid: uid,
+        message: nextStatus === "suspended" ? "계정이 정지되었습니다. 관리자에게 문의하세요." : "계정 사용이 재개되었습니다.",
+        reason: detail,
+        source: "a1",
+        actorUid: user.uid,
+        timestamp: Date.now()
+      }).catch(() => undefined);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "계정 상태 변경 실패";
+      setErrors((current) => [...current, message]);
+    } finally {
+      setAccountActionLoading(false);
+    }
+  }
+
+  async function purgeSelectedAccountUploads() {
+    if (!firebaseReady || !user || !admin || !selectedBranch?.ownerUid) return;
+
+    const uid = selectedBranch.ownerUid;
+    if (purgeConfirmText.trim() !== uid && purgeConfirmText.trim() !== selectedBranch.bizNum) {
+      setErrors((current) => [...current, "삭제 확인을 위해 owner UID 또는 사업자등록번호를 정확히 입력하세요."]);
+      return;
+    }
+
+    const preview = accountPurgePreview?.uid === uid ? accountPurgePreview : null;
+    const confirmed = window.confirm(`${selectedBranch.businessName} 계정 업로드 자료를 삭제할까요?\n\nStorage 파일 ${preview?.storageFiles.length || 0}개, ${bytesText(preview?.totalBytes || 0)}가 삭제되고 playlist 참조가 제거됩니다.`);
+    if (!confirmed) return;
+
+    setPurgingAccountUploads(true);
+    setErrors([]);
+
+    try {
+      const { db, storage } = getFirebaseServices();
+      const files = preview?.storageFiles.length ? preview.storageFiles : await listStorageFilesRecursive(storageRef(storage, `user_uploads/${uid}`));
+      const deviceSnap = await getDocs(query(collection(db, "devices"), where("owner_uid", "==", uid))).catch(() => null);
+      const userRef = doc(db, "users", uid);
+      const userSnap = await getDoc(userRef).catch(() => null);
+      const userData = userSnap?.exists() ? (userSnap.data() as Record<string, unknown>) : {};
+      const branchRefs = Array.from(new Set([selectedBranch.id, selectedBranch.bizNum].filter(Boolean))).map((id) => doc(db, "businesses", id));
+      const jobRef = doc(collection(db, "account_purge_jobs"));
+
+      await setDoc(jobRef, {
+        uid,
+        bizNum: selectedBranch.bizNum,
+        status: "running",
+        storageFileCount: files.length,
+        storageBytes: files.reduce((sum, file) => sum + file.size, 0),
+        startedBy: user.uid,
+        startedAt: serverTimestamp()
+      });
+
+      const userUpdates: Record<string, unknown> = {
+        upload_purge_status: "running",
+        upload_purge_started_at: serverTimestamp(),
+        upload_purge_started_by: user.uid,
+        updated_at: serverTimestamp()
+      };
+      if (Array.isArray(userData.master_playlist)) userUpdates.master_playlist = filterUploadedMediaList(userData.master_playlist, files);
+      if (Array.isArray(userData.playlist)) userUpdates.playlist = filterUploadedMediaList(userData.playlist, files);
+      await setDoc(userRef, userUpdates, { merge: true });
+
+      await Promise.all(
+        (deviceSnap?.docs || []).map((deviceDoc) => {
+          const data = deviceDoc.data() as Record<string, unknown>;
+          const updates: Record<string, unknown> = {
+            mediaPurgeRequestedAt: serverTimestamp(),
+            mediaPurgeReason: "account_upload_purge",
+            updated_at: serverTimestamp()
+          };
+          if (Array.isArray(data.playlist)) updates.playlist = filterUploadedMediaList(data.playlist, files);
+          if (Array.isArray(data.ad_videos)) updates.ad_videos = filterUploadedMediaList(data.ad_videos, files);
+          return setDoc(deviceDoc.ref, updates, { merge: true });
+        })
+      );
+
+      const deleteResults = await Promise.allSettled(
+        files.map((file) =>
+          deleteObject(storageRef(storage, file.fullPath)).catch((error) => {
+            if (!isStorageObjectNotFound(error)) throw error;
+          })
+        )
+      );
+      const deletedCount = deleteResults.filter((result) => result.status === "fulfilled").length;
+      const failedCount = deleteResults.length - deletedCount;
+
+      const completedFields = {
+        upload_purge_status: failedCount ? "partial" : "completed",
+        upload_purged_at: serverTimestamp(),
+        upload_purged_by: user.uid,
+        purged_upload_count: deletedCount,
+        purged_upload_bytes: files.reduce((sum, file) => sum + file.size, 0),
+        updated_at: serverTimestamp()
+      };
+      await Promise.all([
+        setDoc(userRef, completedFields, { merge: true }),
+        ...branchRefs.map((branchRef) => setDoc(branchRef, completedFields, { merge: true })),
+        setDoc(
+          jobRef,
+          {
+            status: failedCount ? "partial" : "completed",
+            deletedFileCount: deletedCount,
+            failedFileCount: failedCount,
+            touchedDeviceCount: deviceSnap?.docs.length || 0,
+            completedAt: serverTimestamp()
+          },
+          { merge: true }
+        )
+      ]);
+
+      await setDoc(doc(collection(db, "a1_audit_logs")), {
+        action: "account.uploads.purge",
+        actorUid: user.uid,
+        actorEmail: user.email || "",
+        target: uid,
+        detail: `${selectedBranch.businessName} / ${selectedBranch.bizNum} / deleted ${deletedCount}/${files.length} / ${bytesText(files.reduce((sum, file) => sum + file.size, 0))}`,
+        createdAt: serverTimestamp()
+      }).catch(() => undefined);
+
+      setAccountPurgePreview(null);
+      setPurgeConfirmText("");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "계정 업로드 자료 삭제 실패";
+      setErrors((current) => [...current, message]);
+    } finally {
+      setPurgingAccountUploads(false);
+    }
+  }
+
   async function handleLogin() {
     if (!firebaseReady) return;
     setErrors([]);
@@ -2015,7 +2410,23 @@ export default function A1Page() {
                   {activeSection === "devices" && <DevicesPanel devices={selectedDevices} presenceByDeviceId={presenceByDeviceId} nowMs={nowMs} />}
 
                   {activeSection === "control" && (
-                    <ControlPanel branch={selectedBranch} canWrite={canWrite} loadingAction={loadingAction} reason={reason} setReason={setReason} changeA4Status={changeA4Status} />
+                    <ControlPanel
+                      branch={selectedBranch}
+                      canWrite={canWrite}
+                      loadingAction={loadingAction}
+                      accountActionLoading={accountActionLoading}
+                      reason={reason}
+                      setReason={setReason}
+                      changeA4Status={changeA4Status}
+                      changeAccountStatus={changeAccountStatus}
+                      scanAccountUploads={scanSelectedAccountUploads}
+                      purgeAccountUploads={purgeSelectedAccountUploads}
+                      purgePreview={accountPurgePreview}
+                      scanningAccountUploads={scanningAccountUploads}
+                      purgingAccountUploads={purgingAccountUploads}
+                      purgeConfirmText={purgeConfirmText}
+                      setPurgeConfirmText={setPurgeConfirmText}
+                    />
                   )}
 
                   {activeSection === "broadcast" && <BroadcastPanel events={selectedAdEvents} />}
@@ -2054,6 +2465,17 @@ export default function A1Page() {
                       savingSettingsPath={savingAdSettingsPath}
                       selectedBranch={selectedBranch}
                       selectedDevices={selectedDevices}
+                      targetMode={adTargetMode}
+                      setTargetMode={setAdTargetMode}
+                      regionOptions={adRegionOptions}
+                      selectedRegionKey={selectedAdRegionKey}
+                      setSelectedRegionKey={setSelectedAdRegionKey}
+                      categoryOptions={adCategoryOptions}
+                      selectedCategory={selectedAdCategory}
+                      setSelectedCategory={setSelectedAdCategory}
+                      targetLabel={adTargetLabel}
+                      targetStoreCount={adTargetBranches.length}
+                      targetDeviceCount={adTargetMode === "global" ? devices.length : adTargetDevices.length}
                       uploadFile={uploadStorageAdFile}
                       publishFile={publishStorageAdFile}
                       saveSettings={saveStorageAdSettings}
@@ -2209,10 +2631,12 @@ function StoreSelector({
                 <div className="truncate">
                   <p className="row-title truncate">{branch.businessName}</p>
                   <p className="row-meta truncate">사업자등록번호 {branch.bizNum}</p>
+                  <p className="row-meta truncate">{branch.category} · {branch.regionKey || "권역 미분류"}</p>
                   <p className="row-meta truncate">owner {branch.ownerUid || "-"}</p>
                 </div>
                 <div className="pill-row">
                   <span className={`pill ${branch.status === "active" ? "green" : "amber"}`}>{branch.status}</span>
+                  <span className={`pill ${branch.accountStatus === "suspended" ? "red" : "green"}`}>계정 {branch.accountStatus === "suspended" ? "정지" : "정상"}</span>
                   <span className={`pill ${branch.a4Status === "suspended" ? "red" : "green"}`}>A4 {branch.a4Status === "suspended" ? "중단" : "정상"}</span>
                   <span className="pill blue">{count} devices</span>
                 </div>
@@ -2258,9 +2682,13 @@ function StoreSummary({
           <Field label="사업자등록번호" value={branch.bizNum} />
           <Field label="매장 표시명" value={branch.storeName} />
           <Field label="대표/소유 UID" value={branch.ownerUid || "-"} />
+          <Field label="카테고리" value={branch.category || "-"} />
+          <Field label="권역" value={branch.regionKey || "-"} />
+          <Field label="주소" value={branch.address || "-"} />
           <Field label="연결 기기" value={`${selectedDevices.length}대`} />
           <Field label="실시간 수신 기기" value={`${onlineCount}대`} />
           <Field label="매장 광고 송출 로그" value={`${selectedAdEvents.length}건`} />
+          <Field label="계정 상태" value={branch.accountStatus === "suspended" ? "정지" : "정상"} />
           <Field label="A4 상태" value={branch.a4Status === "suspended" ? "사용중단" : "정상"} />
           <Field label="중단 사유" value={branch.a4SuspendedReason || "-"} />
         </div>
@@ -2309,16 +2737,34 @@ function ControlPanel({
   branch,
   canWrite,
   loadingAction,
+  accountActionLoading,
   reason,
   setReason,
-  changeA4Status
+  changeA4Status,
+  changeAccountStatus,
+  scanAccountUploads,
+  purgeAccountUploads,
+  purgePreview,
+  scanningAccountUploads,
+  purgingAccountUploads,
+  purgeConfirmText,
+  setPurgeConfirmText
 }: {
   branch?: Branch;
   canWrite: boolean;
   loadingAction: boolean;
+  accountActionLoading: boolean;
   reason: string;
   setReason: (value: string) => void;
   changeA4Status: (status: "active" | "suspended") => void;
+  changeAccountStatus: (status: "active" | "suspended") => void;
+  scanAccountUploads: () => void;
+  purgeAccountUploads: () => void;
+  purgePreview: AccountPurgePreview | null;
+  scanningAccountUploads: boolean;
+  purgingAccountUploads: boolean;
+  purgeConfirmText: string;
+  setPurgeConfirmText: (value: string) => void;
 }) {
   if (!branch) return <div className="empty">선택된 사업자가 없습니다.</div>;
 
@@ -2362,6 +2808,68 @@ function ControlPanel({
             </div>
           </div>
           <div className="notice">A1은 `businesses/{branch.bizNum}`에 `a4_status: suspended`를 기록합니다. A4는 이 값을 감시해서 콘솔 진입을 차단해야 합니다.</div>
+        </div>
+      </div>
+
+      <div className="panel-body account-safety">
+        <div className="action-box">
+          <div className="detail-grid">
+            <Field label="계정 상태" value={branch.accountStatus === "suspended" ? "정지" : "정상"} />
+            <Field label="owner UID" value={branch.ownerUid || "-"} />
+            <Field label="계정 정지 시간" value={branch.accountSuspendedAt} />
+            <Field label="계정 정지 관리자" value={branch.accountSuspendedBy || "-"} />
+            <Field label="정지 사유" value={branch.accountSuspendedReason || "-"} />
+            <Field label="재개 시간" value={branch.accountResumedAt} />
+          </div>
+          <div className="toolbar">
+            <button className="button danger" onClick={() => changeAccountStatus("suspended")} disabled={!canWrite || accountActionLoading || !branch.ownerUid || branch.accountStatus === "suspended"}>
+              <Lock size={16} />
+              계정 정지
+            </button>
+            <button className="button success" onClick={() => changeAccountStatus("active")} disabled={!canWrite || accountActionLoading || !branch.ownerUid || branch.accountStatus === "active"}>
+              <Unlock size={16} />
+              계정 재개
+            </button>
+            <button className="button" onClick={scanAccountUploads} disabled={!canWrite || scanningAccountUploads || !branch.ownerUid}>
+              <Search size={16} />
+              {scanningAccountUploads ? "스캔 중" : "업로드 자료 스캔"}
+            </button>
+          </div>
+          <div className="notice">계정 정지는 A1 DB와 Storage 규칙이 참조할 `account_status` 값을 남깁니다. Firebase Auth 자체 disabled 처리는 Admin SDK 함수가 연결될 때 완전 자동화할 수 있습니다.</div>
+        </div>
+
+        <div className="action-box">
+          <h3 className="subsection-title">정지 계정 자료 삭제</h3>
+          {purgePreview?.uid === branch.ownerUid ? (
+            <>
+              <div className="detail-grid">
+                <Field label="스캔 시간" value={purgePreview.scannedAt} />
+                <Field label="Storage 파일" value={`${purgePreview.storageFiles.length}개`} />
+                <Field label="예상 용량" value={bytesText(purgePreview.totalBytes)} />
+                <Field label="대상 기기" value={`${purgePreview.deviceCount}대`} />
+                <Field label="playlist 참조" value={`${purgePreview.playlistRefCount}개`} />
+              </div>
+              <div className="purge-list">
+                {purgePreview.storageFiles.slice(0, 6).map((file) => (
+                  <div className="purge-row" key={file.fullPath}>
+                    <span className="truncate">{file.name}</span>
+                    <span>{bytesText(file.size)}</span>
+                  </div>
+                ))}
+                {purgePreview.storageFiles.length > 6 && <div className="row-meta">외 {purgePreview.storageFiles.length - 6}개</div>}
+              </div>
+              <label className="scope-box">
+                <span className="scope-label">삭제 확인</span>
+                <input className="input" value={purgeConfirmText} onChange={(event) => setPurgeConfirmText(event.target.value)} placeholder="owner UID 또는 사업자등록번호 입력" />
+              </label>
+              <button className="button danger" onClick={purgeAccountUploads} disabled={!canWrite || purgingAccountUploads || !purgePreview.storageFiles.length || (purgeConfirmText !== branch.ownerUid && purgeConfirmText !== branch.bizNum)}>
+                <Trash2 size={16} />
+                {purgingAccountUploads ? "삭제 중" : "해당 계정 업로드 자료 삭제"}
+              </button>
+            </>
+          ) : (
+            <div className="empty">먼저 업로드 자료를 스캔하면 <code>user_uploads/{branch.ownerUid || "ownerUid"}</code> 파일과 playlist 참조를 확인합니다.</div>
+          )}
         </div>
       </div>
     </div>
@@ -2480,6 +2988,17 @@ function StoragePanel({
   savingSettingsPath,
   selectedBranch,
   selectedDevices,
+  targetMode,
+  setTargetMode,
+  regionOptions,
+  selectedRegionKey,
+  setSelectedRegionKey,
+  categoryOptions,
+  selectedCategory,
+  setSelectedCategory,
+  targetLabel,
+  targetStoreCount,
+  targetDeviceCount,
   uploadFile,
   publishFile,
   saveSettings,
@@ -2520,6 +3039,17 @@ function StoragePanel({
   savingSettingsPath: string;
   selectedBranch?: Branch;
   selectedDevices: Device[];
+  targetMode: AdTargetMode;
+  setTargetMode: (mode: AdTargetMode) => void;
+  regionOptions: string[];
+  selectedRegionKey: string;
+  setSelectedRegionKey: (value: string) => void;
+  categoryOptions: string[];
+  selectedCategory: string;
+  setSelectedCategory: (value: string) => void;
+  targetLabel: string;
+  targetStoreCount: number;
+  targetDeviceCount: number;
   uploadFile: (file: File | null) => void;
   publishFile: (file: StorageAdFile, scope: AdDeliveryScope) => void;
   saveSettings: (file: StorageAdFile) => void;
@@ -2746,8 +3276,79 @@ function StoragePanel({
             <div className="step-header">
               <span className="step-number">3</span>
               <div>
+                <h3>송출 대상</h3>
+                <p>{targetLabel} · 매장 {targetStoreCount}개 · A3 {targetDeviceCount}대</p>
+              </div>
+            </div>
+
+            <div className="settings-stack">
+              <div className="scope-box">
+                <p className="scope-label">대상 방식</p>
+                <div className="segmented segmented-wrap" aria-label="Ad target mode">
+                  <button type="button" className={targetMode === "global" ? "active" : ""} onClick={() => setTargetMode("global")}>
+                    전체
+                  </button>
+                  <button type="button" className={targetMode === "region" ? "active" : ""} onClick={() => setTargetMode("region")}>
+                    권역
+                  </button>
+                  <button type="button" className={targetMode === "category" ? "active" : ""} onClick={() => setTargetMode("category")}>
+                    카테고리
+                  </button>
+                  <button type="button" className={targetMode === "segment" ? "active" : ""} onClick={() => setTargetMode("segment")}>
+                    권역+카테고리
+                  </button>
+                  <button type="button" className={targetMode === "store" ? "active" : ""} onClick={() => setTargetMode("store")}>
+                    선택 매장
+                  </button>
+                </div>
+              </div>
+
+              {(targetMode === "region" || targetMode === "segment") && (
+                <label className="scope-box">
+                  <span className="scope-label">권역</span>
+                  <select className="input" value={selectedRegionKey} onChange={(event) => setSelectedRegionKey(event.target.value)}>
+                    {regionOptions.map((region) => (
+                      <option value={region} key={region}>
+                        {region}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              )}
+
+              {(targetMode === "category" || targetMode === "segment") && (
+                <label className="scope-box">
+                  <span className="scope-label">매장 카테고리</span>
+                  <select className="input" value={selectedCategory} onChange={(event) => setSelectedCategory(event.target.value)}>
+                    {categoryOptions.map((category) => (
+                      <option value={category} key={category}>
+                        {category}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              )}
+
+              {targetMode === "store" && (
+                <div className="policy-preview">
+                  <p className="field-label">선택 매장</p>
+                  <p className="field-value">{selectedBranch?.businessName || selectedBranch?.bizNum || "-"}</p>
+                </div>
+              )}
+
+              <div className="policy-preview">
+                <p className="field-label">적용 대상</p>
+                <p className="field-value">{targetLabel} / 매장 {targetStoreCount}개 / A3 {targetDeviceCount}대</p>
+              </div>
+            </div>
+          </section>
+
+          <section className="ad-step-pane">
+            <div className="step-header">
+              <span className="step-number">4</span>
+              <div>
                 <h3>적용</h3>
-                <p>{selectedBranch?.businessName || selectedBranch?.bizNum || "매장 미선택"} · 연결 A3 {selectedDevices.length}대</p>
+                <p>{targetLabel} · A3 {targetDeviceCount}대</p>
               </div>
             </div>
 
@@ -2757,13 +3358,9 @@ function StoragePanel({
                   <Settings size={16} />
                   {savingSettingsPath === selectedFile.fullPath ? "저장 중" : "설정만 저장"}
                 </button>
-                <button className="button success" onClick={() => publishFile(selectedFile, "store")} disabled={!canWrite || busySelected || !selectedFile.url || !selectedDevices.length}>
+                <button className="button success" onClick={() => publishFile(selectedFile, targetMode)} disabled={!canWrite || busySelected || !selectedFile.url || (targetMode !== "global" && !targetDeviceCount)}>
                   <Upload size={16} />
-                  선택 매장 송출
-                </button>
-                <button className="button success" onClick={() => publishFile(selectedFile, "global")} disabled={!canWrite || busySelected || !selectedFile.url}>
-                  <Upload size={16} />
-                  전체 매장 송출
+                  대상에 송출
                 </button>
                 <button className="button" onClick={() => stopFile(selectedFile)} disabled={!canWrite || busySelected}>
                   <Ban size={16} />

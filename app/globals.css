@@ -627,6 +627,37 @@ a {
   gap: 10px;
 }
 
+.account-safety {
+  border-top: 1px solid var(--line);
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 16px;
+}
+
+.subsection-title {
+  margin: 0 0 4px;
+  font-size: 15px;
+  font-weight: 850;
+}
+
+.purge-list {
+  display: grid;
+  gap: 6px;
+  margin: 4px 0;
+}
+
+.purge-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  padding: 8px 10px;
+  font-size: 12px;
+}
+
 .upload-box {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -688,6 +719,16 @@ a {
   color: #fff;
 }
 
+.segmented-wrap {
+  flex-wrap: wrap;
+  width: 100%;
+  overflow: visible;
+}
+
+.segmented-wrap button {
+  flex: 1 1 auto;
+}
+
 .scope-summary {
   margin: 0;
   color: var(--muted);
@@ -716,7 +757,7 @@ a {
 
 .ad-workbench {
   display: grid;
-  grid-template-columns: minmax(260px, 0.9fr) minmax(360px, 1.4fr) minmax(240px, 0.8fr);
+  grid-template-columns: minmax(230px, 0.85fr) minmax(320px, 1.15fr) minmax(260px, 0.95fr) minmax(220px, 0.75fr);
   gap: 14px;
   align-items: start;
 }
@@ -952,6 +993,7 @@ a {
 
   .content-grid,
   .two-col,
+  .account-safety,
   .ad-workbench {
     grid-template-columns: 1fr;
   }
