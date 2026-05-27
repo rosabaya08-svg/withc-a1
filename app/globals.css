@@ -714,6 +714,109 @@ a {
   transition: width 160ms ease;
 }
 
+.ad-workbench {
+  display: grid;
+  grid-template-columns: minmax(260px, 0.9fr) minmax(360px, 1.4fr) minmax(240px, 0.8fr);
+  gap: 14px;
+  align-items: start;
+}
+
+.ad-step-pane {
+  min-height: 420px;
+  display: grid;
+  align-content: start;
+  gap: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  padding: 14px;
+}
+
+.step-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+}
+
+.step-number {
+  width: 28px;
+  height: 28px;
+  display: inline-grid;
+  place-items: center;
+  border-radius: 999px;
+  background: #111827;
+  color: #fff;
+  font-weight: 850;
+  font-size: 13px;
+}
+
+.step-header h3 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 850;
+}
+
+.step-header p {
+  margin: 3px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.ad-select-list,
+.settings-stack,
+.apply-stack {
+  display: grid;
+  gap: 10px;
+}
+
+.ad-select-list {
+  max-height: 520px;
+  overflow: auto;
+}
+
+.ad-select-row {
+  display: grid;
+  gap: 4px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-soft);
+  padding: 11px;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.ad-select-row:hover,
+.ad-select-row.active {
+  border-color: #9bb9ff;
+  background: #f3f7ff;
+}
+
+.selected-ad-summary,
+.policy-preview {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-soft);
+  padding: 12px;
+}
+
+.selected-ad-summary {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+}
+
+.compact-form {
+  margin-top: 0;
+}
+
+.apply-stack .button {
+  width: 100%;
+  justify-content: center;
+}
+
 .form-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -848,7 +951,8 @@ a {
   }
 
   .content-grid,
-  .two-col {
+  .two-col,
+  .ad-workbench {
     grid-template-columns: 1fr;
   }
 
@@ -902,6 +1006,7 @@ a {
   .branch-row,
   .device-row,
   .ad-row,
+  .selected-ad-summary,
   .upload-box,
   .quick-control {
     grid-template-columns: 1fr;

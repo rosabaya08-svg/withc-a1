@@ -40,7 +40,6 @@ import {
   serverTimestamp,
   setDoc,
   where,
-  writeBatch,
   type DocumentReference
 } from "firebase/firestore";
 import { onValue, push, ref as rtdbRef, set } from "firebase/database";
@@ -142,6 +141,19 @@ function adPolicyFromSources(...sources: Array<Record<string, unknown> | undefin
     scheduleEndDate: text(data.scheduleEndDate || data.schedule_end_date),
     scheduleStartTime: text(data.scheduleStartTime || data.schedule_start_time),
     scheduleEndTime: text(data.scheduleEndTime || data.schedule_end_time)
+  };
+}
+
+function defaultAdPolicy(): AdPolicy {
+  return {
+    placement: "normal",
+    clickTarget: "hotdeal",
+    playbackMode: "rolling",
+    dailyLimit: 0,
+    scheduleStartDate: "",
+    scheduleEndDate: "",
+    scheduleStartTime: "",
+    scheduleEndTime: ""
   };
 }
 
@@ -308,6 +320,10 @@ function normalizeA3AdEntry(entry: unknown): A3AdVideoEntry | null {
     const row = entry as Record<string, unknown>;
     const storagePath = text(row.storagePath || row.storage_path || row.fullPath) || storagePathFromFirebaseUrl(url);
     const fileName = text(row.fileName || row.file_name || row.name) || storagePath.split("/").pop() || url.split("/").pop() || "ad_video.mp4";
+    const rowDisplayMode = text(row.displayMode || row.display_mode);
+    const placement = normalizeAdPlacement(
+      row.placement || row.adPlacement || (rowDisplayMode === "fullscreen" ? "portrait_fullscreen" : "normal")
+    );
     return {
       url,
       storagePath,
@@ -317,8 +333,8 @@ function normalizeA3AdEntry(entry: unknown): A3AdVideoEntry | null {
       size: numberValue(row.size),
       assetId: text(row.assetId || row.asset_id || row.adId || row.id) || assetIdFromStoragePath(storagePath || fileName),
       source: text(row.source, "a1_storage"),
-      placement: normalizeAdPlacement(row.placement || row.adPlacement),
-      displayMode: normalizeAdPlacement(row.placement || row.adPlacement) === "portrait_fullscreen" ? "fullscreen" : "normal",
+      placement,
+      displayMode: placement === "portrait_fullscreen" || rowDisplayMode === "fullscreen" ? "fullscreen" : "normal",
       clickTarget: normalizeAdClickTarget(row.clickTarget || row.click_target || row.target),
       landingUrl: text(row.landingUrl || row.landing_url) || adLandingUrl(normalizeAdClickTarget(row.clickTarget || row.click_target || row.target)),
       analysisMode: "daily_until_yesterday",
@@ -593,7 +609,7 @@ export default function A1Page() {
   const [deletingStoragePath, setDeletingStoragePath] = useState("");
   const [deletingApkPath, setDeletingApkPath] = useState("");
   const [deployingApkPath, setDeployingApkPath] = useState("");
-  const [adDeliveryScope, setAdDeliveryScope] = useState<AdDeliveryScope>("global");
+  const [selectedStorageAdPath, setSelectedStorageAdPath] = useState("");
   const [adPlacement, setAdPlacement] = useState<AdPlacement>("normal");
   const [adClickTarget, setAdClickTarget] = useState<AdClickTarget>("hotdeal");
   const [adPlaybackMode, setAdPlaybackMode] = useState<AdPlaybackMode>("rolling");
@@ -632,6 +648,34 @@ export default function A1Page() {
     const asset = adAssets.find((item) => item.id === assetIdFromStoragePath(file.fullPath));
     return adPolicyFromSources(file.customMetadata, asset as unknown as Record<string, unknown> | undefined);
   }
+
+  function applyAdPolicyToForm(policy: AdPolicy) {
+    setAdPlacement(policy.placement);
+    setAdClickTarget(policy.clickTarget);
+    setAdPlaybackMode(policy.playbackMode);
+    setAdDailyLimit(String(policy.dailyLimit || 0));
+    setAdScheduleStartDate(policy.scheduleStartDate);
+    setAdScheduleEndDate(policy.scheduleEndDate);
+    setAdScheduleStartTime(policy.scheduleStartTime);
+    setAdScheduleEndTime(policy.scheduleEndTime);
+  }
+
+  useEffect(() => {
+    if (!storageAdFiles.length) {
+      setSelectedStorageAdPath("");
+      return;
+    }
+    if (!selectedStorageAdPath || !storageAdFiles.some((file) => file.fullPath === selectedStorageAdPath)) {
+      setSelectedStorageAdPath(storageAdFiles[0].fullPath);
+    }
+  }, [selectedStorageAdPath, storageAdFiles]);
+
+  useEffect(() => {
+    if (!selectedStorageAdPath) return;
+    const file = storageAdFiles.find((item) => item.fullPath === selectedStorageAdPath);
+    if (!file) return;
+    applyAdPolicyToForm(adPolicyForFile(file));
+  }, [selectedStorageAdPath, storageAdFiles, adAssets]);
 
   async function refreshAdDailyRollups() {
     if (!firebaseReady || !user || !admin) return;
@@ -949,7 +993,7 @@ export default function A1Page() {
 
     try {
       const { db, storage } = getFirebaseServices();
-      const policy = currentAdPolicy();
+      const policy = defaultAdPolicy();
       const policyMetadata = adPolicyStorageMetadata(policy);
       const policyFields = adPolicyFirestoreFields(policy);
       const safeName = file.name.replace(/[^\w.\-가-힣]/g, "_");
@@ -1008,23 +1052,8 @@ export default function A1Page() {
         createdAt: serverTimestamp()
       }).catch(() => undefined);
 
-      await publishStorageAdFile(
-        {
-          id: storagePath,
-          name: file.name,
-          fullPath: storagePath,
-          bucket: "",
-          contentType: file.type || "video/mp4",
-          size: file.size,
-          updated: new Date().toLocaleString("ko-KR"),
-          url,
-          customMetadata: {
-            ...policyMetadata
-          }
-        },
-        adDeliveryScope
-      );
-
+      setSelectedStorageAdPath(storagePath);
+      applyAdPolicyToForm(policy);
       await refreshStorageAdFiles();
     } catch (error) {
       const message = error instanceof Error ? error.message : "광고 파일 업로드 실패";
@@ -1095,9 +1124,9 @@ export default function A1Page() {
         fileName: file.name,
         contentType: "application/vnd.android.package-archive",
         size: file.size,
-        forceUpdate: apkForceUpdate,
-        installMode: apkForceUpdate ? "forced" : "optional",
-        autoUpdate: false,
+        forceUpdate: true,
+        installMode: "forced",
+        autoUpdate: true,
         releaseNote: apkReleaseNote.trim(),
         status: "uploaded",
         storageDeleted: false,
@@ -1170,9 +1199,9 @@ export default function A1Page() {
         fileName: file.name,
         contentType: file.contentType,
         size: file.size,
-        forceUpdate: apkForceUpdate,
-        installMode: apkForceUpdate ? "forced" : "optional",
-        autoUpdate: apkForceUpdate,
+        forceUpdate: true,
+        installMode: "forced",
+        autoUpdate: true,
         releaseNote,
         status: "active",
         storageDeleted: false,
@@ -1367,37 +1396,28 @@ export default function A1Page() {
     );
   }
 
-  async function setA3PlaylistForDevices(targetDevices: Device[], entries: A3AdVideoEntry[]) {
+  async function upsertAdFileInA3Document(targetRef: DocumentReference, file: StorageAdFile, policy: AdPolicy) {
+    const snapshot = await getDoc(targetRef).catch(() => null);
+    const data = snapshot?.exists() ? (snapshot.data() as Record<string, unknown>) : {};
+    const rawList = Array.isArray(data.ad_videos) ? data.ad_videos : [];
+    const nextEntries = rawList
+      .filter((entry) => !adEntryMatchesFile(entry, file))
+      .map(normalizeA3AdEntry)
+      .filter((entry): entry is A3AdVideoEntry => Boolean(entry));
+
+    nextEntries.push(a3AdEntryFromFile(file, policy));
+    await setA3PlaylistDocument(targetRef, nextEntries);
+  }
+
+  async function upsertAdFileForDevices(targetDevices: Device[], file: StorageAdFile, policy: AdPolicy) {
     if (!targetDevices.length) return;
 
     const { db } = getFirebaseServices();
-    for (let index = 0; index < targetDevices.length; index += 400) {
-      const batch = writeBatch(db);
-      targetDevices.slice(index, index + 400).forEach((device) => {
-        batch.set(
-          doc(db, "devices", device.id),
-          {
-            ad_videos: entries,
-            adDisplayPolicy: {
-              version: 1,
-              analysisMode: "daily_until_yesterday",
-              scheduleMode: "local_device",
-              defaultPlaybackMode: "rolling",
-              fullscreenPlacement: "portrait_fullscreen",
-              clickTargets: {
-                hotdeal: adLandingUrl("hotdeal"),
-                luxury: adLandingUrl("luxury")
-              }
-            },
-            source: "a1",
-            updatedBy: user?.uid || "a1",
-            updatedAt: serverTimestamp()
-          },
-          { merge: true }
-        );
-      });
-      await batch.commit();
-    }
+    await Promise.allSettled(
+      targetDevices.map((device) =>
+        upsertAdFileInA3Document(doc(db, "devices", device.id), file, policy)
+      )
+    );
   }
 
   async function removeAdFileFromA3Document(targetRef: DocumentReference, file: StorageAdFile) {
@@ -1425,7 +1445,7 @@ export default function A1Page() {
     );
   }
 
-  async function publishStorageAdFile(file: StorageAdFile, scope: AdDeliveryScope = adDeliveryScope) {
+  async function publishStorageAdFile(file: StorageAdFile, scope: AdDeliveryScope = "global") {
     if (!firebaseReady || !user || !admin || !file.fullPath) return;
     if (!file.url) {
       setErrors((current) => [...current, `${file.name}: Storage download URL이 없어 A3 송출 목록에 반영하지 못했습니다.`]);
@@ -1445,7 +1465,6 @@ export default function A1Page() {
       const { db, storage } = getFirebaseServices();
       const assetId = assetIdFromStoragePath(file.fullPath);
       const policy = currentAdPolicy();
-      const entries = [a3AdEntryFromFile(file, policy)];
       await updateMetadata(storageRef(storage, file.fullPath), {
         customMetadata: {
           ...(file.customMetadata || {}),
@@ -1455,11 +1474,9 @@ export default function A1Page() {
       }).catch(() => undefined);
 
       if (scope === "global") {
-        await setA3PlaylistDocument(doc(db, "global_campaigns", "current_ads"), entries);
-        await setA3PlaylistForDevices(devices, []);
+        await upsertAdFileInA3Document(doc(db, "global_campaigns", "current_ads"), file, policy);
       } else {
-        await setA3PlaylistDocument(doc(db, "global_campaigns", "current_ads"), []);
-        await setA3PlaylistForDevices(targetDevices, entries);
+        await upsertAdFileForDevices(targetDevices, file, policy);
       }
 
       await setDoc(
@@ -1496,9 +1513,11 @@ export default function A1Page() {
         actorUid: user.uid,
         actorEmail: user.email || "",
         target: scope === "global" ? "global_campaigns/current_ads" : `devices/${targetDevices.length}`,
-        detail: `${file.name} -> ${scope === "global" ? "전체 A3" : `${selectedBranch?.businessName || selectedBranch?.bizNum || "-"} / ${targetDevices.length}대`} playlist replace`,
+        detail: `${file.name} -> ${scope === "global" ? "전체 A3" : `${selectedBranch?.businessName || selectedBranch?.bizNum || "-"} / ${targetDevices.length}대`} playlist upsert`,
         createdAt: serverTimestamp()
       }).catch(() => undefined);
+
+      await refreshStorageAdFiles();
     } catch (error) {
       const message = error instanceof Error ? error.message : "A3 광고 송출 목록 반영 실패";
       setErrors((current) => [...current, message]);
@@ -1634,6 +1653,61 @@ export default function A1Page() {
         })
       )
     );
+  }
+
+  async function stopStorageAdFileBroadcast(file: StorageAdFile) {
+    if (!firebaseReady || !user || !admin || !file.fullPath) return;
+
+    setPublishingStoragePath(file.fullPath);
+    setErrors([]);
+
+    try {
+      const { db } = getFirebaseServices();
+      const assetId = assetIdFromStoragePath(file.fullPath);
+
+      await removeStorageAdFileFromA3(file);
+
+      await setDoc(
+        doc(db, "ad_assets", assetId),
+        {
+          title: file.name,
+          name: file.name,
+          fileName: file.name,
+          storagePath: file.fullPath,
+          storageUrl: file.url,
+          url: file.url,
+          contentType: file.contentType,
+          size: file.size,
+          published: false,
+          publishedScope: "none",
+          publishedDeviceCount: 0,
+          source: "a1_storage_stop",
+          updatedBy: user.uid,
+          stoppedAt: serverTimestamp(),
+          updatedAt: serverTimestamp()
+        },
+        { merge: true }
+      ).catch((error) => {
+        const message = error instanceof Error ? error.message : "ad_assets stop metadata save failed";
+        setErrors((current) => [...current, `ad_assets 송출 중지 저장 실패: ${message}`]);
+      });
+
+      await setDoc(doc(collection(db, "a1_audit_logs")), {
+        action: "storage.ad_video.stop",
+        actorUid: user.uid,
+        actorEmail: user.email || "",
+        target: file.fullPath,
+        detail: `${file.name} broadcast stopped`,
+        createdAt: serverTimestamp()
+      }).catch(() => undefined);
+
+      await refreshStorageAdFiles();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "광고 송출 중지 실패";
+      setErrors((current) => [...current, message]);
+    } finally {
+      setPublishingStoragePath("");
+    }
   }
 
   async function deleteStorageAdFile(file: StorageAdFile) {
@@ -1959,8 +2033,8 @@ export default function A1Page() {
                       deletingPath={deletingStoragePath}
                       publishingPath={publishingStoragePath}
                       uploadProgress={uploadProgress}
-                      deliveryScope={adDeliveryScope}
-                      setDeliveryScope={setAdDeliveryScope}
+                      selectedAdPath={selectedStorageAdPath}
+                      setSelectedAdPath={setSelectedStorageAdPath}
                       placement={adPlacement}
                       setPlacement={setAdPlacement}
                       clickTarget={adClickTarget}
@@ -1983,6 +2057,7 @@ export default function A1Page() {
                       uploadFile={uploadStorageAdFile}
                       publishFile={publishStorageAdFile}
                       saveSettings={saveStorageAdSettings}
+                      stopFile={stopStorageAdFileBroadcast}
                       syncAssets={syncStorageAdAssets}
                       refreshRollups={refreshAdDailyRollups}
                       deleteFile={deleteStorageAdFile}
@@ -2384,8 +2459,8 @@ function StoragePanel({
   deletingPath,
   publishingPath,
   uploadProgress,
-  deliveryScope,
-  setDeliveryScope,
+  selectedAdPath,
+  setSelectedAdPath,
   placement,
   setPlacement,
   clickTarget,
@@ -2408,6 +2483,7 @@ function StoragePanel({
   uploadFile,
   publishFile,
   saveSettings,
+  stopFile,
   syncAssets,
   refreshRollups,
   deleteFile
@@ -2423,8 +2499,8 @@ function StoragePanel({
   deletingPath: string;
   publishingPath: string;
   uploadProgress: number;
-  deliveryScope: AdDeliveryScope;
-  setDeliveryScope: (scope: AdDeliveryScope) => void;
+  selectedAdPath: string;
+  setSelectedAdPath: (path: string) => void;
   placement: AdPlacement;
   setPlacement: (placement: AdPlacement) => void;
   clickTarget: AdClickTarget;
@@ -2445,8 +2521,9 @@ function StoragePanel({
   selectedBranch?: Branch;
   selectedDevices: Device[];
   uploadFile: (file: File | null) => void;
-  publishFile: (file: StorageAdFile) => void;
+  publishFile: (file: StorageAdFile, scope: AdDeliveryScope) => void;
   saveSettings: (file: StorageAdFile) => void;
+  stopFile: (file: StorageAdFile) => void;
   syncAssets: () => void;
   refreshRollups: () => void;
   deleteFile: (file: StorageAdFile) => void;
@@ -2454,7 +2531,9 @@ function StoragePanel({
   const assetsById = useMemo(() => new Map(adAssets.map((asset) => [asset.id, asset])), [adAssets]);
   const policyForFile = (file: StorageAdFile) =>
     adPolicyFromSources(file.customMetadata, assetsById.get(assetIdFromStoragePath(file.fullPath)) as unknown as Record<string, unknown> | undefined);
-  const currentPolicy: AdPolicy = {
+  const selectedFile = files.find((file) => file.fullPath === selectedAdPath) || null;
+  const selectedPolicy = selectedFile ? policyForFile(selectedFile) : null;
+  const draftPolicy: AdPolicy = {
     placement,
     clickTarget,
     playbackMode,
@@ -2464,6 +2543,24 @@ function StoragePanel({
     scheduleStartTime,
     scheduleEndTime
   };
+  const selectedCounts = selectedFile ? adCountsByAsset.get(assetIdFromStoragePath(selectedFile.fullPath)) || { total: 0, completed: 0, failed: 0 } : null;
+  const busySelected = Boolean(
+    selectedFile &&
+      (publishingPath === selectedFile.fullPath || savingSettingsPath === selectedFile.fullPath || deletingPath === selectedFile.fullPath)
+  );
+
+  function loadPolicy(file: StorageAdFile) {
+    const policy = policyForFile(file);
+    setSelectedAdPath(file.fullPath);
+    setPlacement(policy.placement);
+    setClickTarget(policy.clickTarget);
+    setPlaybackMode(policy.playbackMode);
+    setDailyLimit(String(policy.dailyLimit || 0));
+    setScheduleStartDate(policy.scheduleStartDate);
+    setScheduleEndDate(policy.scheduleEndDate);
+    setScheduleStartTime(policy.scheduleStartTime);
+    setScheduleEndTime(policy.scheduleEndTime);
+  }
 
   return (
     <div className="content-stack">
@@ -2484,96 +2581,12 @@ function StoragePanel({
             </button>
           </div>
         </div>
+
         <div className="panel-body">
           <div className="upload-box">
             <div>
               <p className="row-title">광고 영상 업로드</p>
-              <p className="row-meta">Firebase Storage `ad_videos/`에 저장하고 A3가 읽는 `ad_videos` URL 목록까지 반영합니다.</p>
-              <div className="scope-box">
-                <div className="segmented" aria-label="A3 ad delivery target">
-                  <button type="button" className={deliveryScope === "store" ? "active" : ""} onClick={() => setDeliveryScope("store")}>
-                    선택 매장
-                  </button>
-                  <button type="button" className={deliveryScope === "global" ? "active" : ""} onClick={() => setDeliveryScope("global")}>
-                    전체
-                  </button>
-                </div>
-                <p className="scope-summary">
-                  {deliveryScope === "global"
-                    ? "A3 전체 공통 경로(global_campaigns/current_ads.ad_videos)에 URL을 반영합니다."
-                    : `${selectedBranch?.businessName || selectedBranch?.bizNum || "선택 매장"} · 연결 A3 ${selectedDevices.length}대`}
-                </p>
-              </div>
-              <div className="scope-options">
-                <div className="scope-box">
-                  <p className="scope-label">광고 구역</p>
-                  <div className="segmented" aria-label="A3 ad placement">
-                    <button type="button" className={placement === "normal" ? "active" : ""} onClick={() => setPlacement("normal")}>
-                      기본 광고
-                    </button>
-                    <button type="button" className={placement === "portrait_fullscreen" ? "active" : ""} onClick={() => setPlacement("portrait_fullscreen")}>
-                      세로 전면
-                    </button>
-                  </div>
-                </div>
-                <div className="scope-box">
-                  <p className="scope-label">클릭 이동</p>
-                  <div className="segmented" aria-label="A3 ad click target">
-                    <button type="button" className={clickTarget === "hotdeal" ? "active" : ""} onClick={() => setClickTarget("hotdeal")}>
-                      핫딜
-                    </button>
-                    <button type="button" className={clickTarget === "luxury" ? "active" : ""} onClick={() => setClickTarget("luxury")}>
-                      명품관
-                    </button>
-                  </div>
-                  <p className="scope-summary">
-                    {adPlacementLabel(placement)} / {adClickTargetLabel(clickTarget)} / 전일까지 집계
-                  </p>
-                </div>
-              </div>
-              <div className="scope-box">
-                <p className="scope-label">송출 방식</p>
-                <div className="segmented" aria-label="A3 ad playback mode">
-                  <button type="button" className={playbackMode === "rolling" ? "active" : ""} onClick={() => setPlaybackMode("rolling")}>
-                    단순 롤링
-                  </button>
-                  <button type="button" className={playbackMode === "daily_limit" ? "active" : ""} onClick={() => setPlaybackMode("daily_limit")}>
-                    하루 횟수 제한
-                  </button>
-                </div>
-                <p className="scope-summary">{adScheduleSummary(currentPolicy)}</p>
-              </div>
-              <div className="form-grid">
-                <label>
-                  <span>하루 송출 횟수</span>
-                  <input
-                    className="input"
-                    type="number"
-                    min="0"
-                    step="1"
-                    value={dailyLimit}
-                    onChange={(event) => setDailyLimit(event.target.value)}
-                    disabled={playbackMode === "rolling"}
-                    placeholder="0"
-                  />
-                </label>
-                <label>
-                  <span>송출 시작 일자</span>
-                  <input className="input" type="date" value={scheduleStartDate} onChange={(event) => setScheduleStartDate(event.target.value)} />
-                </label>
-                <label>
-                  <span>송출 종료 일자</span>
-                  <input className="input" type="date" value={scheduleEndDate} onChange={(event) => setScheduleEndDate(event.target.value)} />
-                </label>
-                <label>
-                  <span>송출 시작 시간</span>
-                  <input className="input" type="time" value={scheduleStartTime} onChange={(event) => setScheduleStartTime(event.target.value)} />
-                </label>
-                <label>
-                  <span>송출 종료 시간</span>
-                  <input className="input" type="time" value={scheduleEndTime} onChange={(event) => setScheduleEndTime(event.target.value)} />
-                </label>
-              </div>
+              <p className="row-meta">새 영상은 기본 단순 롤링 상태로 보관됩니다. 아래 목록에서 선택한 뒤 옵션을 저장하거나 송출하세요.</p>
             </div>
             <label className={`button primary ${!canWrite || uploading ? "disabled-like" : ""}`}>
               <Upload size={16} />
@@ -2597,48 +2610,178 @@ function StoragePanel({
             </div>
           )}
         </div>
-        <div className="panel-body ad-grid">
-          {files.length ? (
-            files.map((file) => {
-              const policy = policyForFile(file);
-              return (
-              <div className="ad-row" key={file.id}>
-                <div className="truncate">
-                  <p className="row-title truncate">{file.name}</p>
-                  <p className="row-meta truncate">{file.fullPath}</p>
-                  <p className="row-meta truncate">
-                    {file.contentType} · {bytesText(file.size)} · {file.updated}
-                  </p>
-                  <p className="row-meta truncate">
-                    {adPlacementLabel(policy.placement)} / {adClickTargetLabel(policy.clickTarget)} / {adScheduleSummary(policy)}
-                  </p>
-                </div>
-                <div className="pill-row">
-                  <span className="pill blue">Storage</span>
-                  {file.url && (
-                    <a className="button" href={file.url} target="_blank" rel="noreferrer">
+
+        <div className="panel-body ad-workbench">
+          <section className="ad-step-pane">
+            <div className="step-header">
+              <span className="step-number">1</span>
+              <div>
+                <h3>광고 선택</h3>
+                <p>{files.length}개 파일</p>
+              </div>
+            </div>
+            <div className="ad-select-list">
+              {files.length ? (
+                files.map((file) => {
+                  const policy = policyForFile(file);
+                  const selected = selectedFile?.fullPath === file.fullPath;
+                  return (
+                    <button className={`ad-select-row ${selected ? "active" : ""}`} key={file.id} type="button" onClick={() => loadPolicy(file)}>
+                      <span className="row-title truncate">{file.name}</span>
+                      <span className="row-meta truncate">{file.contentType} · {bytesText(file.size)}</span>
+                      <span className="row-meta truncate">{adScheduleSummary(policy)}</span>
+                    </button>
+                  );
+                })
+              ) : (
+                <div className="empty">Firebase Storage의 `ad_videos/` 폴더에 표시할 영상이 없습니다.</div>
+              )}
+            </div>
+          </section>
+
+          <section className="ad-step-pane">
+            <div className="step-header">
+              <span className="step-number">2</span>
+              <div>
+                <h3>옵션 설정</h3>
+                <p>{selectedFile ? selectedFile.name : "선택된 광고 없음"}</p>
+              </div>
+            </div>
+
+            {selectedFile ? (
+              <div className="settings-stack">
+                <div className="selected-ad-summary">
+                  <div className="truncate">
+                    <p className="row-title truncate">{selectedFile.name}</p>
+                    <p className="row-meta truncate">{selectedFile.fullPath}</p>
+                    <p className="row-meta truncate">저장값: {selectedPolicy ? adScheduleSummary(selectedPolicy) : "-"}</p>
+                  </div>
+                  {selectedFile.url && (
+                    <a className="button" href={selectedFile.url} target="_blank" rel="noreferrer">
                       열기
                     </a>
                   )}
-                  <button className="button success" onClick={() => publishFile(file)} disabled={!canWrite || publishingPath === file.fullPath || !file.url} title="A3 광고 URL 송출 반영">
-                    <Upload size={16} />
-                    {publishingPath === file.fullPath ? "송출 중" : "송출"}
-                  </button>
-                  <button className="button" onClick={() => saveSettings(file)} disabled={!canWrite || savingSettingsPath === file.fullPath || !file.url} title="이 광고에 현재 설정 저장">
-                    <Settings size={16} />
-                    {savingSettingsPath === file.fullPath ? "저장 중" : "설정"}
-                  </button>
-                  <button className="button danger" onClick={() => deleteFile(file)} disabled={!canWrite || deletingPath === file.fullPath} title="Storage 광고 파일 삭제">
-                    <Trash2 size={16} />
-                    {deletingPath === file.fullPath ? "삭제 중" : "삭제"}
-                  </button>
+                </div>
+
+                <div className="scope-options">
+                  <div className="scope-box">
+                    <p className="scope-label">광고 구역</p>
+                    <div className="segmented" aria-label="A3 ad placement">
+                      <button type="button" className={placement === "normal" ? "active" : ""} onClick={() => setPlacement("normal")}>
+                        기본 광고
+                      </button>
+                      <button type="button" className={placement === "portrait_fullscreen" ? "active" : ""} onClick={() => setPlacement("portrait_fullscreen")}>
+                        세로 전면
+                      </button>
+                    </div>
+                  </div>
+                  <div className="scope-box">
+                    <p className="scope-label">클릭 이동</p>
+                    <div className="segmented" aria-label="A3 ad click target">
+                      <button type="button" className={clickTarget === "hotdeal" ? "active" : ""} onClick={() => setClickTarget("hotdeal")}>
+                        핫딜
+                      </button>
+                      <button type="button" className={clickTarget === "luxury" ? "active" : ""} onClick={() => setClickTarget("luxury")}>
+                        명품관
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="scope-box">
+                  <p className="scope-label">송출 방식</p>
+                  <div className="segmented" aria-label="A3 ad playback mode">
+                    <button type="button" className={playbackMode === "rolling" ? "active" : ""} onClick={() => setPlaybackMode("rolling")}>
+                      단순 롤링
+                    </button>
+                    <button type="button" className={playbackMode === "daily_limit" ? "active" : ""} onClick={() => setPlaybackMode("daily_limit")}>
+                      하루 횟수 제한
+                    </button>
+                  </div>
+                </div>
+
+                <div className="form-grid compact-form">
+                  <label>
+                    <span>기기당 하루 송출 횟수</span>
+                    <input
+                      className="input"
+                      type="number"
+                      min="0"
+                      step="1"
+                      value={dailyLimit}
+                      onChange={(event) => setDailyLimit(event.target.value)}
+                      disabled={playbackMode === "rolling"}
+                      placeholder="0"
+                    />
+                  </label>
+                  <label>
+                    <span>시작 일자</span>
+                    <input className="input" type="date" value={scheduleStartDate} onChange={(event) => setScheduleStartDate(event.target.value)} />
+                  </label>
+                  <label>
+                    <span>종료 일자</span>
+                    <input className="input" type="date" value={scheduleEndDate} onChange={(event) => setScheduleEndDate(event.target.value)} />
+                  </label>
+                  <label>
+                    <span>시작 시간</span>
+                    <input className="input" type="time" value={scheduleStartTime} onChange={(event) => setScheduleStartTime(event.target.value)} />
+                  </label>
+                  <label>
+                    <span>종료 시간</span>
+                    <input className="input" type="time" value={scheduleEndTime} onChange={(event) => setScheduleEndTime(event.target.value)} />
+                  </label>
+                </div>
+
+                <div className="policy-preview">
+                  <p className="field-label">적용 예정</p>
+                  <p className="field-value">{adPlacementLabel(placement)} / {adClickTargetLabel(clickTarget)} / {adScheduleSummary(draftPolicy)}</p>
                 </div>
               </div>
-              );
-            })
-          ) : (
-            <div className="empty">Firebase Storage의 `ad_videos/` 폴더에 표시할 영상이 없습니다.</div>
-          )}
+            ) : (
+              <div className="empty">옵션을 수정할 광고를 먼저 선택하세요.</div>
+            )}
+          </section>
+
+          <section className="ad-step-pane">
+            <div className="step-header">
+              <span className="step-number">3</span>
+              <div>
+                <h3>적용</h3>
+                <p>{selectedBranch?.businessName || selectedBranch?.bizNum || "매장 미선택"} · 연결 A3 {selectedDevices.length}대</p>
+              </div>
+            </div>
+
+            {selectedFile ? (
+              <div className="apply-stack">
+                <button className="button primary" onClick={() => saveSettings(selectedFile)} disabled={!canWrite || busySelected || !selectedFile.url}>
+                  <Settings size={16} />
+                  {savingSettingsPath === selectedFile.fullPath ? "저장 중" : "설정만 저장"}
+                </button>
+                <button className="button success" onClick={() => publishFile(selectedFile, "store")} disabled={!canWrite || busySelected || !selectedFile.url || !selectedDevices.length}>
+                  <Upload size={16} />
+                  선택 매장 송출
+                </button>
+                <button className="button success" onClick={() => publishFile(selectedFile, "global")} disabled={!canWrite || busySelected || !selectedFile.url}>
+                  <Upload size={16} />
+                  전체 매장 송출
+                </button>
+                <button className="button" onClick={() => stopFile(selectedFile)} disabled={!canWrite || busySelected}>
+                  <Ban size={16} />
+                  송출 중지
+                </button>
+                <button className="button danger" onClick={() => deleteFile(selectedFile)} disabled={!canWrite || busySelected}>
+                  <Trash2 size={16} />
+                  {deletingPath === selectedFile.fullPath ? "삭제 중" : "파일 삭제"}
+                </button>
+                <div className="policy-preview">
+                  <p className="field-label">전일까지 집계</p>
+                  <p className="field-value">{selectedCounts?.total || 0}회 / 완료 {selectedCounts?.completed || 0} / 실패 {selectedCounts?.failed || 0}</p>
+                </div>
+              </div>
+            ) : (
+              <div className="empty">적용할 광고가 없습니다.</div>
+            )}
+          </section>
         </div>
       </div>
 
@@ -2794,8 +2937,8 @@ function ReleasePanel({
               <input className="input" value={releaseNote} onChange={(event) => setReleaseNote(event.target.value)} placeholder="변경 내용을 입력하세요" />
             </label>
             <label className="check-row">
-              <input type="checkbox" checked={forceUpdate} onChange={(event) => setForceUpdate(event.target.checked)} />
-              배포 시 A3 자동 업데이트 표시
+              <input type="checkbox" checked={true} readOnly disabled />
+              배포 시 A3 강제 업데이트 팝업 표시
             </label>
           </div>
         </div>
